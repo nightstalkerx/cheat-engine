@@ -45,6 +45,9 @@ GLOBAL initcs
 GLOBAL extramemory
 GLOBAL extramemorysize
 
+GLOBAL dbvmversion
+GLOBAL exportlist
+
 %define VMCALL db 0x0f, 0x01, 0xc1 ;vmcall
 
 ;everything here is in virtual memory, paging has already been setup properly
@@ -64,10 +67,14 @@ pagedirlvl4:        dq 0 ;virtual address of the pml4 page (the memory after thi
 nextstack:          dq 0 ;start of stack for the next cpu
 extramemory:        dq 0 ;physical address of a contiguous block of physical memory available to DBVM
 extramemorysize:    dq 0 ;number of pages in extramemory
+dbvmversion:        dq 11
+exportlist:         dq 0
 ;uefibooted:         dq 0 ;if set it means this has to launch the AP cpu's as well
 
 initcs: dd 0 ;critical section to block entering cpus.  Each CPU sets up the stack for the next CPU (so there will always be one too many)
 vmmentrycount: dd 0  ;The number of times 0x00400000 has been executed (in short, the number of CPU's launched)
+
+;lasttsc: dq 0
 
 afterinitvariables:
 
@@ -317,6 +324,7 @@ vmsave
 ;on return RAX and RSP are unchanged, but ALL other registers are changed and MUST be saved first
 ;xchg bx,bx
 
+db 0x48
 fxsave [rsp+fxsavespace]
 mov [rsp+saved_r15],r15
 mov [rsp+saved_r14],r14
@@ -336,6 +344,7 @@ mov [rsp+saved_rax],rax
 
 mov rdi,[rsp+currentcpuinfo]
 lea rsi,[rsp+saved_r15] ;vmregisters
+lea rdx,[rsp+fxsavespace] ;fxsave
 
 call vmexit_amd
 
@@ -344,6 +353,7 @@ cmp eax,1
 je vmrun_exit
 
 ;restore
+db 0x48
 fxrstor [rsp+fxsavespace]
 mov r15,[rsp+saved_r15]
 mov r14,[rsp+saved_r14]
@@ -495,19 +505,24 @@ ret
 
 align 16
 vmxloop_vmexit:
-cli
+;cli
 ;ok, this should be executed
 
-cmp dword [fs:0x14],0
-je isbootcpu
+;cmp dword [fs:0x14],0
+;je isbootcpu
 
 
 
-isbootcpu:
+;isbootcpu:
 
 ;save registers
 
+
 sub rsp,15*8
+
+mov [rsp+14*8],rax
+mov [rsp+11*8],rdx
+
 
 mov [rsp],r15
 mov [rsp+1*8],r14
@@ -520,10 +535,9 @@ mov [rsp+7*8],r8
 mov [rsp+8*8],rbp
 mov [rsp+9*8],rsi
 mov [rsp+10*8],rdi
-mov [rsp+11*8],rdx
 mov [rsp+12*8],rcx
 mov [rsp+13*8],rbx
-mov [rsp+14*8],rax
+
 
 ;set host into a 'valid' state
 mov rbp,rsp
@@ -558,7 +572,9 @@ notfucker:
 
 and rsp,-0x10 ;0xfffffffffffffff0;
 sub rsp,512
+db 0x48
 fxsave [rsp]
+mov rdx,rsp ;param 3, pointer to fxsave
 
 sub rsp,32
 
@@ -567,6 +583,7 @@ sub rsp,32
 call vmexit
 
 add rsp,32
+db 0x48
 fxrstor [rsp]
 
 
@@ -583,7 +600,6 @@ jae vmxloop_exitvm
 
 
 ;returned 0, so
-
 
 ;restore vmx registers (esp-36)
 pop r15
@@ -608,10 +624,6 @@ vmresume
 ;never executed unless on error
 ;restore state of vmm
 
-
-%ifdef JTAG
-db 0xf1 ;jtag breakpoint
-%endif
 
 pop r15
 pop r14
@@ -652,9 +664,6 @@ pop rax
 
 vmlaunch
 
-%ifdef JTAG
-db 0xf1 ;jtag breakpoint
-%endif
 
 ;never executed unless on error
 ;restore state of vmm
@@ -680,9 +689,7 @@ pop rbx
 pop rax
 
 vmresume
-%ifdef JTAG
-db 0xf1 ;jtag breakpoint
-%endif
+
 
 ;never executed unless on error
 mov dword [fs:0x10],0xce00 ;exitreason 0xce00
@@ -812,7 +819,7 @@ db 0xcc
 db 0xcc
 
 ;----------------------;
-;ULONG getGDTbase(void);
+;QWORD getGDTbase(void);
 ;----------------------;
 getGDTbase:
 push rbp
@@ -828,7 +835,7 @@ db 0xcc
 db 0xcc
 
 ;----------------------;
-;ULONG getIDTbase(void);
+;QWORD getIDTbase(void);
 ;----------------------;
 getIDTbase:
 push rbp
@@ -1312,6 +1319,19 @@ db 0xcc
 db 0xcc
 db 0xcc
 
+global setCR8
+;--------------------;
+;setCR8(QWORD newcr8);
+;--------------------;
+setCR8:
+mov cr8,rdi
+ret
+
+global getCR8
+getCR8:
+mov rax,cr8
+ret
+
 
 global getDR0
 ;------------------;
@@ -1418,8 +1438,68 @@ global _invpcid
 ;--------------------------;
 ;_invlpg(int type, 128data);
 ;--------------------------;
+_invpcid:
 db 0x66,0x0f,0x38,0x82,0x3e ;invpcid rdi,[rsi]
 ret
+
+global _invept
+;--------------------------;
+;_invept(int type, 128data);  type must be either 1(local for specific ept pointer) or 2(global for all vpids)
+;--------------------------;
+_invept:
+invept rdi,[rsi]
+ret
+
+
+global _invept2
+;---------------------------;
+;_invept2(int type, 128data);  type must be either 1(local for specific ept pointer) or 2(global for all vpids)
+;---------------------------;
+_invept2:
+invept rdi,[rsi]
+jc _invept2_err1
+jz _invept2_err2
+xor rax,rax
+ret
+
+_invept2_err1:
+mov eax,1
+ret
+
+_invept2_err2:
+mov eax,2
+ret
+
+
+
+global _invvpid
+;--------------------------;
+;_invvpid(int type, 128data);  type must be either 0(specific linear address for specific vpid) 1(local for specific vpid) or 2(global for all vpids)
+;--------------------------;
+_invvpid:
+invvpid rdi,[rsi]
+ret
+
+global _invvpid2
+;----------------------------;
+;_invvpid2(int type, 128data);  type must be either 0(specific linear address for specific vpid) 1(local for specific vpid) or 2(global for all vpids)
+;----------------------------;
+_invvpid2:
+invvpid rdi,[rsi]
+jc _vmread2_err1
+jz _vmread2_err2
+xor rax,rax
+ret
+
+_invvpid2_err1:
+mov eax,1
+ret
+
+_invvpid2_err2:
+mov eax,2
+ret
+
+
 
 
 global _invlpg
@@ -1479,7 +1559,6 @@ db 0xcc
 global inthandler%1
 inthandler%1:
 ;xchg bx,bx
-
 cli ;is probably already done, but just to be sure
 
 ;db 0xf1 ; jtag break

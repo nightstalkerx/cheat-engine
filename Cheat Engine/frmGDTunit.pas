@@ -91,6 +91,7 @@ var limit: word;
     aa,bb: uint64;
 begin
   limit:=0;
+  {$ifdef windows}
   address:=getgdt(@limit);
 
   outputdebugstring(format('gdt limit = %d',[limit]));
@@ -167,8 +168,10 @@ begin
     end else showmessage(rsGDTReadError);
 
   finally
-    freemem(x);
+    freememandnil(x);
   end;
+
+  {$endif}
 
 end;
 

@@ -3,19 +3,36 @@
 
 #include <stddef.h>
 
+#define STATISTICS
+
+#define TSCHOOK
+
 #define MAX_STACK_SIZE 0x10000
 
 #if (defined SERIALPORT) && (SERIALPORT != 0)
   #define DEBUG //comment for release
   #define DEBUGINTHANDLER //comment for release
+  #define CHECKAPICID
 #endif
 
 #if (DISPLAYDEBUG==1)
   #define DEBUG
   #define DEBUGINTHANDLER
+  #define CHECKAPICID
 #endif
 
+
+
 #define ULTIMAPDEBUG //for debugging ultimap (I seem to have misplaced my serial port...)
+
+#define EXIT_FAILURE 0xffffffff
+#define EXIT_SUCCESS 0
+
+#define INT_MAX __INT_MAX__
+#define INT_MIN (-INT_MAX - 1)
+#define SHRT_MAX __SHRT_MAX__
+#define SCHAR_MAX __SCHAR_MAX__
+#define UCHAR_MAX (SCHAR_MAX * 2 + 1)
 
 
 #define BYTE unsigned char
@@ -28,6 +45,16 @@
 #ifndef NULL
 #define NULL (void*)0
 #endif
+
+typedef int VMSTATUS;
+#define VM_OK 0
+#define VM_ERROR 1
+
+
+typedef int BOOL;
+
+#define TRUE 1
+#define FALSE 0
 
 #define UNUSED __attribute__((unused))
 
@@ -57,7 +84,19 @@ typedef volatile struct _criticalSection
   volatile int locked;
   volatile int apicid;
   int lockcount;
+#ifdef DEBUG
+  int ignorelock;
+#endif
 } criticalSection, *PcriticalSection;
+
+
+typedef volatile struct _multireadexclusivewritesychronizer
+{
+  volatile int lock;
+  volatile int readers;
+  volatile int writers; //max 1
+
+} multireadexclusivewritesychronizer, *Pmultireadexclusivewritesychronizer;
 
 typedef struct _stacklistentry{
   struct _stacklistentry *previous;
@@ -108,13 +147,19 @@ typedef union
 //extern UINT64 inportb(UINT64 port);
 //extern void outportb(UINT64 port, UINT64 value);
 
-inline void bochsbp(void);
-inline void jtagbp(void);
-inline unsigned char inportb(unsigned int port);
-inline void outportb(unsigned int port,unsigned char value);
+void bochsbp(void);
+void jtagbp(void);
 
-inline unsigned long inportd(unsigned int port);
-inline void outportd(unsigned int port,unsigned long value);
+/* Input a byte from a port */
+unsigned char inportb(unsigned int port);
+
+void outportb(unsigned int port,unsigned char value);
+
+unsigned long inportd(unsigned int port);
+
+void outportd(unsigned int port,unsigned long value);
+
+int abs(int j);
 
 extern void clearScreen(void);
 extern void debugbreak(void);
@@ -124,8 +169,10 @@ extern ULONG getRSP(void);
 extern ULONG getRBP(void);
 
 int itoa(unsigned int value,int base, char *output,int maxsize);
+int lltoa(unsigned long long value,int base, char *output,int maxsize);
 //int atoi(const char *nptr);
 unsigned long long atoi2(char* input, int base, int *err);
+unsigned long long int strtoull(const char *nptr, char **endptr, int base);
 
 void zeromemory(volatile void *address, unsigned int size);
 void printchar(char c, int x, int y, char foreground, char background);
@@ -134,19 +181,40 @@ void sendchar(char c);
 
 extern void enableserial(void);
 
+
+
 size_t strspn(const char *str, const char *chars);
 int isalpha(int c);
 int isdigit(int c);
 int isalnum(int c);
+int isspace(int c);
+int iscntrl(int c);
 int toupper(int c);
 int tolower(int c);
+int isprint(int c);
 
-inline int min(int x,int y);
-inline int max(int x,int y);
+int isgraph(int c);
+int islower(int c);
+int ispunct(int c);
+int isupper(int c);
+int islower(int c);
+int isxdigit(int c);
+
+
+
+QWORD minq(QWORD x,QWORD y);
+QWORD maxq(QWORD x,QWORD y);
+int min(int x,int y);
+int max(int x,int y);
+
 
 double floor(double x);
 double ceil(double x);
+double pow(double x, double y);
+double sqrt(double x);
+double frexp(double x, int *exp);
 
+double fmod(double a, double b);
 
 int strcoll(const char *s1, const char *s2);
 
@@ -156,8 +224,12 @@ int strcoll(const char *s1, const char *s2);
   void sendstringf(char *string, ...);
 
   int sprintf(char *str, const char *format, ...);
+  int snprintf(char *str, size_t size, const char *format, ...);
+
 
   char *strchr(const char *s, int c);
+
+  char *addCharToString(char c, char* string, int lastpos, int *stringsize);
 
 //#endif
 
@@ -169,14 +241,20 @@ int strcoll(const char *s1, const char *s2);
 */
 
 
+void exit(int status);
+void abort(void);
+
 void setCursorPos(unsigned char x, unsigned char y);
-char getchar(void);
+int getchar(void);
 char waitforchar(void);
 int readstring(char *s, int minlength, int maxlength);
 int readstringc(char *s, int minlength, int maxlength);
 size_t strlen(const char *s);
 char *strcat(char *dest, const char *src);
+char *strncat(char *dest, const char *src, size_t n);
 char *strcpy(char *dest, const char *src);
+char *strncpy(char *dest, const char *src, size_t n);
+
 volatile void* copymem(volatile void *dest, volatile const void *src, size_t size);
 void *memcpy(void *dest, const void *src, size_t n);
 void *memset(void *s, int c, size_t n);
@@ -184,9 +262,12 @@ int memcmp(const void *s1, const void *s2, size_t n);
 int strcmp(const char *s1, const char *s2);
 int strncmp(const char *s1, const char *s2, size_t n);
 char *strstr(const char *haystack, const char *needle);
+size_t strcspn(const char *s, const char *reject);
 
 char *strpbrk(const char *s, const char *accept);
 double strtod(const char *nptr, char **endptr);
+
+void *memchr(const void *s, int c, size_t n);
 
 unsigned int getAPICID(void);
 unsigned int generateCRC(unsigned char *ptr, int size);
@@ -198,6 +279,7 @@ int vbuildstring(char *str, int size, char *string, __builtin_va_list arglist);
 
 
 
+
 void sendDissectedFlags(PRFLAGS rflags);
 
 
@@ -205,6 +287,9 @@ void csEnter(PcriticalSection CS);
 void csLeave(PcriticalSection CS);
 
 int spinlock(volatile int *CS); //returns 0
+
+void lockedQwordIncrement(volatile QWORD *address, QWORD inccount);
+
 void resync(void);
 
 typedef struct textvideo {
@@ -445,12 +530,12 @@ typedef struct
   unsigned Limit0_15          : 16;
   unsigned Base0_23           : 24;
   unsigned Type               : 4;
-  unsigned System             : 1;
+  unsigned NotSystem          : 1;
   unsigned DPL                : 2;
   unsigned P                  : 1;
   unsigned Limit16_19         : 4;
   unsigned AVL                : 1;
-  unsigned Reserved           : 1;
+  unsigned L                  : 1; //long mode
   unsigned B_D                : 1;
   unsigned G                  : 1;
   unsigned Base24_31          : 8;
@@ -460,7 +545,7 @@ typedef struct tagINT_VECTOR
 {
   WORD  wLowOffset;
   WORD  wSelector;
-  BYTE  bUnused;
+  BYTE  bUnused; //3 bits of bUnused describe the IST
   BYTE  bAccess;
   WORD  wHighOffset;
   DWORD Offset32_63;
@@ -492,6 +577,18 @@ typedef struct _INVPCIDDESCRIPTOR
   QWORD LinearAddress;
 } __attribute__((__packed__)) INVPCIDDESCRIPTOR, *PINVPCIDDESCRIPTOR;
 
+typedef struct _INVEPTDESCRIPTOR
+{
+  QWORD EPTPointer;
+  QWORD Zero;
+} __attribute__((__packed__)) INVEPTDESCRIPTOR, *PINVEPTDESCRIPTOR;
+
+typedef struct _INVVPIDDESCRIPTOR
+{
+  unsigned VPID:12;
+  QWORD zero:52;
+  QWORD LinearAddress;
+} __attribute__((__packed__)) INVVPIDDESCRIPTOR, *PINVVPIDDESCRIPTOR;
 
 /* obsolete, use rflags now
 typedef struct tagEFLAGS
@@ -530,12 +627,27 @@ typedef int (*POPCNT_IMPLEMENTATION)(QWORD val);
 extern POPCNT_IMPLEMENTATION popcnt;
 
 extern int getcpunr();
-extern int call32bit(DWORD address);
+int call32bit(DWORD address);
+extern int call32bita(DWORD address, DWORD stackaddress);
 
 #if DISPLAYDEBUG
 void initialize_displaydebuglogs();
 #endif
 
+DWORD getGDTENTRYBase(PGDT_ENTRY entry);
+void setGDTENTRYBase(PGDT_ENTRY entry, DWORD base);
+
+GDT_ENTRY Build16BitDataSegmentDescriptor(DWORD baseaddress, DWORD size);
+GDT_ENTRY Build16BitCodeSegmentDescriptor(DWORD baseaddress, DWORD size);
+GDT_ENTRY Build32BitDataSegmentDescriptor(DWORD baseaddress, DWORD size);
+GDT_ENTRY Build32BitCodeSegmentDescriptor(DWORD baseaddress, DWORD size);
+
+int getCPUCount();
+
 void InitCommon();
+
+#include <asm-generic/errno-base.h>
+int errno; //todo: implement this
+
 
 #endif

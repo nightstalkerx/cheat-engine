@@ -57,6 +57,7 @@ type
 
   TfrmSnapshotHandler = class(TForm)
     btnCompare: TButton;
+    shImageList: TImageList;
     lblCompare: TLabel;
     MainMenu1: TMainMenu;
     MenuItem1: TMenuItem;
@@ -106,14 +107,14 @@ begin
     freeandnil(pic);
 
   if constantbuffer<>nil then
-    Freemem(constantbuffer);
+    FreeMemAndNil(constantbuffer);
 
   if stack<>nil then
-    freemem(stack);
+    FreeMemAndNil(stack);
 
 
   if functionname<>nil then
-    freemem(functionname);
+    FreeMemAndNil(functionname);
 
   inherited destroy;
 end;
@@ -457,6 +458,7 @@ procedure TfrmSnapshotHandler.miConfigClick(Sender: TObject);
 var frmD3DHookSnapshotConfig: TfrmD3DHookSnapshotConfig;
     pf: integer;
 begin
+  {$IFDEF windows}
   frmd3dhooksnapshotconfig:=TfrmD3DHookSnapshotConfig.create(self);
   try
     if frmd3dhooksnapshotconfig.showmodal=mrok then
@@ -481,6 +483,7 @@ begin
   finally
     frmd3dhooksnapshotconfig.free;
   end;
+  {$ENDIF}
 end;
 
 {

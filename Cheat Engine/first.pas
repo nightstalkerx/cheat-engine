@@ -4,14 +4,18 @@ unit first;
 
 interface
 
+{$ifdef windows}
 uses
-  Classes, SysUtils;
+  betterDLLSearchPath, Classes, SysUtils;
+{$endif}
 
 implementation
 
+{$ifdef windows}
 uses windows, registry, Win32Int;
 
-procedure setDPIAware;
+
+procedure setDPIAware;   //won't work in windows 10 anymore
 type
   PROCESS_DPI_AWARENESS=(PROCESS_DPI_UNAWARE=0, PROCESS_SYSTEM_DPI_AWARE=1, PROCESS_PER_MONITOR_DPI_AWARE=2);
 
@@ -20,7 +24,7 @@ var
   SetProcessDPIAware:function: BOOL; stdcall;
   l: HModule;
 begin
-
+  OutputDebugString('setDPIAware');
   l:=LoadLibrary('Shcore.dll');
   if l<>0 then
   begin
@@ -28,20 +32,24 @@ begin
 
     if assigned(SetProcessDpiAwareness) then
     begin
+     // OutputDebugString('p1');
       SetProcessDpiAwareness(PROCESS_SYSTEM_DPI_AWARE);
       exit;
     end;
   end;
 
+
   //still here, probably win8.0 or 7
   l:=LoadLibrary('user32.dll');
   if l<>0 then
   begin
+   // OutputDebugString('p2');
     farproc(SetProcessDPIAware):=GetProcAddress(l,'SetProcessDPIAware');
     if assigned(SetProcessDPIAware) then
       SetProcessDPIAware;
   end;
 
+  OutputDebugString('p3');
 end;
 
 var
@@ -51,6 +59,7 @@ var
   hassetdpiaware: boolean;
 initialization
   //todo, check registry if not a trainer
+
   istrainer:=false;
   hassetdpiaware:=false;
 
@@ -86,7 +95,14 @@ initialization
         r.WriteBool('DPI Aware', true);
       end;
     end;
+
+    r.free;
+    r:=nil;
   end;
+{$endif}
+
+
+
 
 end.
 

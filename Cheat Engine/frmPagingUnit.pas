@@ -25,6 +25,7 @@ type
     cb64bit: TCheckBox;
     edtCR3: TEdit;
     FindDialog1: TFindDialog;
+    pImageList: TImageList;
     Label1: TLabel;
     frmPaging: TPanel;
     MenuItem1: TMenuItem;
@@ -125,6 +126,7 @@ procedure TfrmPaging.FormCreate(Sender: TObject);
 var cr3: QWORD;
   cr4: DWORD;
 begin
+  {$ifdef windows}
   if getcr3(processhandle, cr3) then
     edtcr3.text:=inttohex(cr3,8);
 
@@ -137,6 +139,7 @@ begin
   cr4:=GetCR4;
   cb8byteentries.checked:=((cr4 shr 5) and 1)=1;
 
+  {$endif}
 
 
 end;
@@ -194,6 +197,7 @@ var
 
 begin
   //page table
+  {$ifdef windows}
 
   if node=nil then
   begin
@@ -265,13 +269,14 @@ begin
     end;
 
   finally
-    freemem(buf);
+    freememandnil(buf);
   end;
+  {$endif}
 end;
 
 procedure TfrmPaging.FillNodeLevel2(node: TTreenode);
 var
-  pd: PPageData;
+  pd: PPageData=nil;
   buf: pointer;
   q: Puint64Array absolute buf;
   d: PDwordArray absolute buf;
@@ -287,6 +292,7 @@ var
 
 begin
   //fill in the pagedir table
+  {$ifdef windows}
   if node=nil then
   begin
     virtualbase:=0;
@@ -377,16 +383,16 @@ begin
       end;
     end;
   finally
-    freemem(buf);
+    freememandnil(buf);
   end;
 
-  if node=nil then
-    freemem(pd);
-
+  if pd<>nil then
+    freememandnil(pd);
+  {$endif}
 end;
 
 procedure TfrmPaging.FillNodeLevel3(node: TTreenode);
-var pd: PPageData;
+var pd: PPageData=nil;
   buf: pointer;
   q: Puint64Array absolute buf;
   max: integer;
@@ -400,6 +406,7 @@ var pd: PPageData;
   physicalbase: qword;
 begin
   //fill in the pagedir pointer table
+  {$ifdef windows}
   if node=nil then
   begin
     virtualbase:=0;
@@ -456,12 +463,13 @@ begin
   end;
 
   finally
-    freemem(buf);
+    freememandnil(buf);
   end;
 
-  if node=nil then
-    freemem(pd);
+  if pd<>nil then
+    freememandnil(pd);
 
+  {$endif}
 
 end;
 
@@ -499,6 +507,7 @@ var x: ptrUint;
   pd: PPageData;
   cr4: ptruint;
 begin
+  {$ifdef windows}
   base:=StrToQWordEx('$'+edtcr3.text);
 
   cleanup;
@@ -542,8 +551,9 @@ begin
     else
       raise exception.create(rsFailureReadingPhysicalMemory);
   finally
-    freemem(buf);
+    freememandnil(buf);
   end;
+  {$endif}
 end;
 
 initialization

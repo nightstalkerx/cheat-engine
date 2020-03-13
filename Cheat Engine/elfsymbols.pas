@@ -8,6 +8,9 @@ uses
 {$ifdef JNI}
   Classes, SysUtils, elftypes, elfconsts, networkInterface, unixporthelper, newkernelhandler, processhandlerunit;
 {$else}
+  {$ifdef darwin}
+  macport,
+  {$endif}
   Classes, SysUtils, elftypes, elfconsts, networkInterface, cefuncproc, newkernelhandler, processhandlerunit;
 {$endif}
 
@@ -89,7 +92,7 @@ begin
       result:=EnumElfSymbols64(modulename, modulebase, mem, callback);
   end;
 
-  freemem(mem);
+  FreeMemAndNil(mem);
 end;
 
 

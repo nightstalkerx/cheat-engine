@@ -2,6 +2,10 @@ if getTranslationFolder()~='' then
   loadPOFile(getTranslationFolder()..'monoscript.po')
 end
 
+local StructureElementCallbackID=nil
+
+mono_timeout=3000 --change to 0 to never timeout (meaning: 0 will freeze your face off if it breaks on a breakpoint, just saying ...)
+
 MONOCMD_INITMONO=0
 MONOCMD_OBJECT_GETCLASS=1
 MONOCMD_ENUMDOMAINS=2
@@ -40,6 +44,8 @@ MONOCMD_OBJECT_NEW=33
 MONOCMD_OBJECT_INIT=34
 MONOCMD_GETVTABLEFROMCLASS=35
 MONOCMD_GETMETHODPARAMETERS=36
+MONOCMD_ISCLASSGENERIC=37
+MONOCMD_ISIL2CPP=38
 
 
 
@@ -143,9 +149,159 @@ function monoTypeToVarType(monoType)
   return result
 end
 
+function parseImage(t, image)
+  if image.parsed then return end
+  
+ 
+  local classes=mono_image_enumClasses(image.handle)
+  if t.Terminated then return end
+  
+  if classes then
+    --monoSymbolList.addSymbol('','Pen15',address,1)
+    local i
+    for i=1,#classes do
+      local classname=classes[i].classname
+      local namespace=classes[i].namespace
+      local methods=mono_class_enumMethods(classes[i].class)
+      
+      if methods then
+        local j
+        for j=1,#methods do
+          local address=readPointer(methods[j].method) --first pointer is a pointer to the code
+          local sname=classname..'.'..methods[j].name
+          
+          if namespace and namespace~='' then
+            sname=namespace..'.'..sname
+          end
+
+          monoSymbolList.addSymbol('',sname,address,1)
+        end      
+      end
+      
+      if t.Terminated then return end
+    end  
+  end 
+  
+end
+
+function monoIL2CPPSymbolEnum(t)
+  t.freeOnTerminate(false)
+  t.Name='monoIL2CPPSymbolEnum'
+  
+  print("monoIL2CPPSymbolEnum");
+  
+  local priority=nil  
+  --first enum all images
+  local images={}
+  local assemblies=mono_enumAssemblies() 
+  
+  if assemblies then
+    for i=1,#assemblies do      
+      images[i]={}
+      images[i].handle=mono_getImageFromAssembly(assemblies[i])
+      images[i].name=mono_image_get_name(images[i].handle)
+      images[i].parsed=false
+      
+      if images[i].name=='Assembly-CSharp.dll' then
+        priority=i
+      end
+    end
+  end
+      
+  if monopipe==nil or t.Terminated then return end
+  
+  if priority then
+    print("parsing "..images[priority].name..'(1/'..#images..')');
+  
+    parseImage(t, images[priority])
+  end
+  if monopipe==nil or t.Terminated then return end
+  
+  for i=1,#images do
+    local x=i
+    
+    if priority then x=x+1 end
+    
+    print("parsing "..images[i].name..'('..x..'/'..#images..')');
+    parseImage(t, images[i])
+    if monopipe==nil or t.Terminated then return end
+  end
+
+  print("all symbols loaded") --print is threadsafe
+  monoSymbolList.FullyLoaded=true
+end
+
+function mono_StructureListCallback()
+  local r={}
+  local ri=1;
+  if monopipe then
+    --return a list of all classes
+    --print("Getting classlist")
+    mono_enumImages(
+      function(image)
+        --enum classes
+        --print("Getting classes for ".. mono_image_get_name(image))
+        local classlist=mono_image_enumClasses(image)
+        if classlist then
+          local i
+          for i=1,#classlist do            
+            r[ri]={}
+            r[ri].name=classlist[i].classname
+            r[ri].id1=classlist[i].class
+            ri=ri+1
+          end
+        end
+      end
+    )
+  
+    
+  end
+  
+  return r
+end
+
+function mono_ElementListCallback(class) --2nd param ignored
+  local r={}
+  --print("Getting class fields for "..class..",",extra)
+  if monopipe~=nil then
+    --enumerate the fields in the class and return it
+    local fields=mono_class_enumFields(class, true) 
+    if fields then    
+      for i=1, #fields do
+        if fields[i].isStatic==false then
+          r[i]={}
+          r[i].name=fields[i].name
+          r[i].offset=fields[i].offset
+          r[i].vartype=monoTypeToVarType(fields[i].monotype)                    
+        end
+      end
+    end
+    
+  end
+  
+  return r
+end
+
 
 function LaunchMonoDataCollector()
   --if debug_canBreak() then return 0 end
+  
+  if monoSymbolEnum then
+    monoSymbolEnum.terminate()
+    monoSymbolEnum.waitfor()
+    print("bye monoSymbolEnum")
+    monoSymbolEnum.destroy()
+    monoSymbolEnum=nil
+  end
+  
+  if monoSymbolList then  
+    print("monoSymbolList exists");
+    if tonumber(monoSymbolList.ProcessID)~=getOpenedProcessID() or (monoSymbolList.FullyLoaded==false) then     
+      print("new il2cpp SymbolList")
+      monoSymbolList.destroy()
+      monoSymbolList=nil
+    end
+  end
 
   if (monopipe~=nil) then
     if (mono_AttachedProcess==getOpenedProcessID()) then
@@ -167,6 +323,14 @@ function LaunchMonoDataCollector()
   else
     dllname=dllname.."32.dll"
   end
+  
+  autoAssemble([[ 
+mono-2.0-bdwgc.mono_error_ok: 
+mov eax,1 
+ret 
+]]) --don't care if it fails
+
+  
 
   if injectDLL(getCheatEngineDir()..[[\autorun\dlls\]]..dllname)==false then
     print(translate("Failure injecting the MonoDatacollector dll"))
@@ -176,18 +340,43 @@ function LaunchMonoDataCollector()
   --wait till attached
   local timeout=getTickCount()+5000;
   while (monopipe==nil) and (getTickCount()<timeout) do
-    monopipe=connectToPipe('cemonodc_pid'..getOpenedProcessID(),5000)
+    monopipe=connectToPipe('cemonodc_pid'..getOpenedProcessID() ,mono_timeout)
   end
 
   if (monopipe==nil) then
     return 0 --failure
   end
+  
+  monopipe.OnError=function(self)
+    --print("monopipe error")    
+  end
 
-  monopipe.OnTimeout=function(self)
-    monopipe.destroy()
+  monopipe.OnTimeout=function(self)  
+    --print("monopipe timeout") 
+    local oldmonopipe=monopipe
     monopipe=nil
     mono_AttachedProcess=0
-    monoBase=0     
+    monoBase=0
+    
+    if self then
+      oldmonopipe.unlock()
+    end
+      
+    if inMainThread() and monoSymbolEnum then
+      monoSymbolEnum.terminate()    
+      monoSymbolEnum.waitfor()
+      print("bye monoSymbolEnum due to timeout")
+      monoSymbolEnum.destroy()
+      monoSymbolEnum=nil
+    end
+    
+    oldmonopipe.destroy()
+
+
+    if StructureElementCallbackID then 
+      unregisterStructureAndElementListCallback(StructureElementCallbackID)
+      StructureElementCallbackID=nil
+    end
   end
 
   --in case you implement the profiling tools use a secondary pipe to receive profiler events
@@ -222,6 +411,21 @@ function LaunchMonoDataCollector()
 
   if (monoSettings==nil) then
     monoSettings=getSettings("MonoExtension")  
+  end
+  
+  StructureElementCallbackID=registerStructureAndElementListCallback(mono_StructureListCallback, mono_ElementListCallback)
+
+  monopipe.IL2CPP=mono_isil2cpp()
+  
+  if monopipe.IL2CPP then
+    if monoSymbolList==nil then
+      monoSymbolList=createSymbolList()
+      monoSymbolList.register() 
+      monoSymbolList.ProcessID=getOpenedProcessID()
+      monoSymbolList.FullyLoaded=false        
+      monoSymbolEnum=createThread(monoIL2CPPSymbolEnum)
+
+    end
   end
 
   return monoBase
@@ -284,6 +488,9 @@ end
 function mono_symbolLookupCallback(symbol)
   --if debug_canBreak() then return nil end
 
+  if monopipe == nil then return nil end  
+  if monopipe.IL2CPP then return nil end
+
   local parts={}
   local x
   for x in string.gmatch(symbol, "[^:]+") do
@@ -327,7 +534,8 @@ function mono_addressLookupCallback(address)
   --if (inMainThread()==false) or (debug_canBreak()) then --the debugger thread might call this
   --  return nil
   --end
-
+  if monopipe==nil then return nil end
+  if monopipe.IL2CPP then return nil end
 
 
   local ji=mono_getJitInfo(address)
@@ -366,6 +574,7 @@ end
 
 function mono_object_getClass(address)
   --if debug_canBreak() then return nil end
+  if monopipe==nil then return nil end
 
   monopipe.lock()
   monopipe.writeByte(MONOCMD_OBJECT_GETCLASS)
@@ -383,8 +592,24 @@ function mono_object_getClass(address)
 
     return classaddress, classname
   else
-    monopipe.unlock()
+    if monopipe then
+      monopipe.unlock()
+    end
+    
     return nil
+  end
+end
+
+
+function mono_enumImages(onImage)
+  local assemblies=mono_enumAssemblies()
+  if assemblies then
+    for i=1,#assemblies do
+      local image=mono_getImageFromAssembly(assemblies[i])
+      if image and (image~=0) then
+        onImage(image)      
+      end
+    end
   end
 end
 
@@ -395,16 +620,22 @@ function mono_enumDomains()
 
 
   monopipe.lock()
-  monopipe.writeByte(MONOCMD_ENUMDOMAINS)
+  if monopipe==nil then return nil end
+  
+  monopipe.writeByte(MONOCMD_ENUMDOMAINS)  
   local count=monopipe.readDword()
+  if monopipe==nil then return nil end
+  
   local result={}
   local i
   if (count~=nil) then
-    for i=1, count do
+    for i=1, count do      
       result[i]=monopipe.readQword()
+      if monopipe==nil then return nil end
     end
   end
-
+  
+  if monopipe==nil then return nil end
   monopipe.unlock()
 
   return result
@@ -444,8 +675,10 @@ end
 
 function mono_getImageFromAssembly(assembly)
   --if debug_canBreak() then return nil end
-
-  monopipe.lock()
+  if monopipe==nil then return nil end
+  monopipe.lock()  
+  if monopipe==nil then return nil end
+  
   monopipe.writeByte(MONOCMD_GETIMAGEFROMASSEMBLY)
   monopipe.writeQword(assembly)
   monopipe.unlock()
@@ -455,7 +688,10 @@ end
 function mono_image_get_name(image)
   --if debug_canBreak() then return nil end
 
+  if monopipe==nil then return nil end  
   monopipe.lock()
+  if monopipe==nil then return nil end
+  
   monopipe.writeByte(MONOCMD_GETIMAGENAME)
   monopipe.writeQword(image)
   local namelength=monopipe.readWord()
@@ -465,14 +701,80 @@ function mono_image_get_name(image)
   return name
 end
 
+function mono_isValidName(str)
+  local r=string.find(str, "[^%a%d_.]", 1)
+  return (r==nil) or (r>=5)
+end
+
+function mono_isValidName(str)
+  if str then
+    local r=string.find(str, "[^%a%d_.]", 1)
+    return (r==nil) or (r>=5)
+  else
+    return false
+  end
+end
+
+function mono_image_enumClasses_il2cppfallback(image)
+  --all classes have the image as first field.
+  --Classes are aligned on a 16 byte boundary
+  --offset 0x10 of the class has a pointer to the string
+
+  --first find all possible classes for this image (can contain a few wrong ones)
+  local ms=createMemScan()
+  local scantype=vtDword
+  local pointersize=4
+  if targetIs64Bit() then
+    scantype=vtQword
+    pointersize=8
+  end
+
+  ms.firstScan(soExactValue,scantype,rtRounded,string.format('%x',image),'', 0,0x7ffffffffffffffff, '', fsmAligned, "10",true, true,false,false)
+  ms.waitTillDone()
+
+  local fl=createFoundList(ms)
+  fl.initialize()
+
+  local result={}
+  for i=0,fl.Count-1 do
+    local e={}
+    e.class=tonumber('0x'..fl[i])
+    e.classname=readString(readPointer(e.class+pointersize*2),200)
+    e.namespace=readString(readPointer(e.class+pointersize*3),200)
+    if (e.classname==nil) or (e.classname=='') or (mono_isValidName(e.classname)==false) then e=nil end
+    if e and ((e.namespace~='') and (mono_isValidName(e.namespace)==false)) then e=nil end
+
+    if e then
+      table.insert(result,e)
+    end
+  end
+
+  fl.destroy()
+  ms.destroy()
+
+  return result
+end
+
+
 function mono_image_enumClasses(image)
   --if debug_canBreak() then return nil end
+  if monopipe==nil then return nil end
 
   monopipe.lock()
   monopipe.writeByte(MONOCMD_ENUMCLASSESINIMAGE)
   monopipe.writeQword(image)
   local classcount=monopipe.readDword()
-  if classcount==nil then return nil end
+  if (classcount==nil) or (classcount==0) then
+    if monopipe then
+      monopipe.unlock()
+    end
+    
+    if monopipe.IL2CPP then
+      return mono_image_enumClasses_il2cppfallback(image)
+    end
+    
+    return nil
+  end
 
   local classes={}
   local i,j
@@ -487,7 +789,8 @@ function mono_image_enumClasses(image)
       classes[j].class=c 
       local classnamelength=monopipe.readWord()
       if classnamelength>0 then
-        classes[j].classname=monopipe.readString(classnamelength)
+        local n=monopipe.readString(classnamelength)
+        classes[j].classname=n
       else
         classes[j].classname=''
       end
@@ -506,6 +809,28 @@ function mono_image_enumClasses(image)
   monopipe.unlock()
 
   return classes;
+end
+
+function mono_class_isgeneric(class)
+  local result=''
+  monopipe.lock()
+  monopipe.writeByte(MONOCMD_ISCLASSGENERIC)
+  monopipe.writeQword(class)
+
+  result=monopipe.readByte()~=0 
+
+  monopipe.unlock()
+  return result;
+end
+
+function mono_isil2cpp(class)
+  local result=''
+  monopipe.lock()
+  monopipe.writeByte(MONOCMD_ISIL2CPP)
+  result=monopipe.readByte()~=0 
+
+  monopipe.unlock()
+  return result;
 end
 
 function mono_class_getName(class)
@@ -604,6 +929,11 @@ end
 
 function mono_class_getVTable(domain, klass)
   --if debug_canBreak() then return nil end
+  if monopipe.IL2CPP then
+    return klass
+  end
+  
+  
   local result=0
   monopipe.lock()
   monopipe.writeByte(MONOCMD_GETVTABLEFROMCLASS)
@@ -753,7 +1083,7 @@ function mono_class_findInstancesOfClass(domain, klass, OnScanDone, ProgressBar)
         miDissectStruct.Shortcut='Ctrl+D'
         miDissectStruct.OnClick=function(m)
           --
-          local n=sender.Selected
+          local n=tv.Selected
           
           if n then
             while n.level>0 do --get the parent
@@ -774,7 +1104,7 @@ function mono_class_findInstancesOfClass(domain, klass, OnScanDone, ProgressBar)
         miInvokeMethod.Shortcut='Ctrl+I'
         miInvokeMethod.OnClick=function(m)        
           --show the methodlist
-          local n=sender.Selected
+          local n=tv.Selected
           
           if n then
             while n.level>0 do --get the parent
@@ -915,9 +1245,13 @@ end
 function mono_class_enumFields(class, includeParents)
   --if debug_canBreak() then return nil end
 
+
   local classfield;
   local index=1;
   local fields={}
+  
+  if monopipe==nil then return fields end
+    
   
   if includeParents then
     local parent=mono_class_getParent(class)
@@ -962,7 +1296,9 @@ function mono_class_enumFields(class, includeParents)
 
   until (classfield==nil) or (classfield==0)
 
-  monopipe.unlock()
+  if monopipe then
+    monopipe.unlock()
+  end
 
   return fields
 
@@ -1081,6 +1417,8 @@ function mono_object_findRealStartOfObject(address, maxsize)
 
 
   while (currentaddress>address-maxsize) do
+    if monopipe==nil then return nil end
+    
     local classaddress,classname=mono_object_getClass(currentaddress)
 
     if (classaddress~=nil) and (classname~=nil) then
@@ -1112,6 +1450,8 @@ function mono_image_findClass(image, namespace, classname)
   --if debug_canBreak() then return nil end
 
 --find a class in a specific image
+  if monopipe==nil then return 0 end
+
   monopipe.lock()
 
   monopipe.writeByte(MONOCMD_FINDCLASS)
@@ -1127,7 +1467,7 @@ function mono_image_findClass(image, namespace, classname)
 
   result=monopipe.readQword()
   monopipe.unlock()
-
+  
   return result
 end
 
@@ -1136,6 +1476,12 @@ function mono_image_findClassSlow(image, namespace, classname)
 
 --find a class in a specific image
   local result=0
+  
+  if monopipe==nil then return 0 end
+  
+  
+ 
+    
 
   monopipe.lock()
 
@@ -1160,6 +1506,8 @@ function mono_findClass(namespace, classname)
   --if debug_canBreak() then return nil end
 
 --searches all images for a specific class
+ -- print(string.format("mono_findClass: namespace=%s classname=%s", namespace, classname))
+
   local ass=mono_enumAssemblies()
   local result
   
@@ -1361,10 +1709,32 @@ function mono_method_getSignature(method)
       parameternames[i]='param'..i
     end
   end
+  
+  if monopipe.IL2CPP then
+    result=''
+    
+    for i=1,paramcount do
+      local typenamelength=monopipe.readWord()
+      local typename
+      if typenamelength>0 then
+        typename=monopipe.readString(typenamelength)
+      else
+        typename='<undefined>'
+      end  
 
-
-  local resultlength=monopipe.readWord();
-  result=monopipe.readString(resultlength);
+      result=result..typename
+      if i<paramcount then
+        result=result..','
+      end      
+    end  
+    
+   
+    
+    --build a string with these typenames
+  else
+    local resultlength=monopipe.readWord();
+    result=monopipe.readString(resultlength);
+  end
 
   local returntypelength=monopipe.readByte()
   returntype=monopipe.readString(returntypelength)  
@@ -1406,6 +1776,8 @@ end
 function mono_compile_method(method) --Jit a method if it wasn't jitted yet
   --if debug_canBreak() then return nil end
 
+  --print(string.format("mono_compile_method. Method=%x", method))
+
   monopipe.lock()
 
   monopipe.writeByte(MONOCMD_COMPILEMETHOD)
@@ -1441,6 +1813,8 @@ function mono_methodheader_getILCode(methodheader)
 end
 
 function mono_getILCodeFromMethod(method)
+  if monopipe.IL2CPP then return nil end
+  
   local hdr=mono_method_getHeader(method)
   return mono_methodheader_getILCode(hdr)
 end
@@ -1775,10 +2149,9 @@ end
 
 
 function mono_invoke_method(domain, method, object, args)
-  --if debug_canBreak() then return nil end
-
   monopipe.lock()
   monopipe.writeByte(MONOCMD_INVOKEMETHOD)
+  
   monopipe.writeQword(domain)
   monopipe.writeQword(method)
   monopipe.writeQword(object)
@@ -1791,8 +2164,15 @@ function mono_invoke_method(domain, method, object, args)
   end
   
   local result=mono_readObject()
-  monopipe.unlock()
-  return result;
+  
+  if monopipe then
+    monopipe.unlock()
+    return result      
+  else
+    --something bad happened
+    LaunchMonoDataCollector()
+    return nil
+  end
   
 end
 
@@ -1835,10 +2215,6 @@ end
 --------code belonging to the mono dissector form---------
 
 --]]
-
-function monoform_killform(sender)
-  return caFree
-end
 
 function monoform_miShowMethodParametersClick(sender)  
   monoSettings.Value["ShowMethodParameters"]=sender.checked  
@@ -1887,6 +2263,8 @@ function monoform_miRejitClick(sender)
 end
 
 function monoform_miGetILCodeClick(sender)
+  if monopipe.IL2CPP then return end
+  
   if (monoForm.TV.Selected~=nil) then
     local node=monoForm.TV.Selected
     if (node~=nil) and (node.Level==4) and (node.Parent.Text=='methods') then
@@ -1983,6 +2361,27 @@ function monoform_miFindInstancesOfClass(sender)
       mono_class_findInstancesOfClass(nil, node.data) 
     end
   end
+end
+
+function monoform_createInstanceOfClass(sender)
+  local node=monoForm.TV.Selected
+  if (node~=nil) then    
+    if (node.Data~=nil) and (node.Level==2) then     
+      local r=mono_object_new(node.data)
+      if r then
+        print(string.format("mono_object_new returned %x",r))
+        if r and (r~=0) then
+          r=mono_object_init(r);
+          if r then
+            print(string.format("mono_object_init returned success"))
+          else
+            print(string.format("mono_object_init returned false"))
+          end        
+        end
+      end
+      
+    end  
+  end  
 end
 
 
@@ -2173,8 +2572,8 @@ function monoform_context_onpopup(sender)
   local methodsEnabled = (node~=nil) and (node.Level==4) and (node.Parent.Text=='methods')
   monoForm.miRejit.Enabled = methodsEnabled
   monoForm.miInvokeMethod.Enabled = methodsEnabled
-  monoForm.miGetILCode.Enabled = methodsEnabled
-  monoForm.miShowILDisassembly.Enabled = methodsEnabled
+  monoForm.miGetILCode.Enabled = methodsEnabled and (monopipe.IL2CPP==false)
+  monoForm.miShowILDisassembly.Enabled = methodsEnabled and (monopipe.IL2CPP==false)
   local structuresEnabled = (node~=nil) and (node.Data~=nil) and (node.Level==2)
   monoForm.miExportStructure.Enabled = structuresEnabled
   local fieldsEnabled = (node~=nil) and (node.Data~=nil)
@@ -2185,22 +2584,40 @@ function monoform_context_onpopup(sender)
   monoForm.miAddStaticFieldAddress.Enabled = fieldsEnabled
   
   monoForm.miFindInstancesOfClass.Enabled=structuresEnabled
+  monoForm.miCreateClassInstance.Enabled=structuresEnabled
 end
+
+
 
 function monoform_EnumImages(node)
   --print("monoform_EnumImages")
   local i
-  local domain=node.Data
-  --mono_setCurrentDomain(domain)
+
   local assemblies=mono_enumAssemblies()
+  local images={}
+  
+  mono_enumImages(
+    function(image)
+      local imagename=mono_image_get_name(image)
+      
+      if imagename then       
+        local e={}
+        e.image=image
+        e.imagename=imagename  
 
-  for i=1, #assemblies do
-    local image=mono_getImageFromAssembly(assemblies[i])
-    local imagename=mono_image_get_name(image)
-    local n=node.add(string.format("%x : %s", image, imagename))
-    n.HasChildren=true;
-    n.Data=image
-
+        table.insert(images,e)        
+      end
+    end
+  )
+  
+  table.sort(images,function(e1,e2)
+    return e1.imagename < e2.imagename
+  end)
+  
+  for i=1,#images do    
+    local n=node.add(string.format("%x : %s", images[i].image, images[i].imagename))          n.HasChildren=true
+    n.Data=images[i].image
+    n.HasChildren=true
   end
 end
 
@@ -2237,6 +2654,13 @@ function monoform_EnumClasses(node)
   if classes~=nil then
     for i=1, #classes do
       classes[i].fqname = mono_class_getFullName(classes[i].class)
+      if classes[i].fqname==nil or classes[i].fqname=='' then        
+        classes[i].fqname=classes[i].classname
+        
+        if classes[i].fqname==nil or classes[i].fqname=='' then  
+          classes[i].fqname='<unnamed>'
+        end
+      end
     end
   
     local monoform_class_compare = function (a,b)
@@ -2472,12 +2896,14 @@ function monoform_FindDialogFind(sender)
 end
 
 function monoform_miFindClassClick(sender)
+  --print("findclass click");
   monoForm.FindDialog.OnFind=monoform_FindDialogFindClass
   monoForm.FindDialog.execute()
 end
 
 
 function monoform_miFindClick(sender)
+  --print("find click");
   monoForm.FindDialog.OnFind=monoform_FindDialogFind
   monoForm.FindDialog.execute()
 end
@@ -2507,16 +2933,43 @@ function mono_dissect()
   if (monopipe==nil)  then
     LaunchMonoDataCollector()
   end
-
+  
   if (monoForm==nil) then
     monoForm=createFormFromFile(getCheatEngineDir()..[[\autorun\forms\MonoDataCollector.frm]])
     if monoSettings.Value["ShowMethodParameters"]~=nil then
-      monoForm.miShowMethodParameters.Checked=monoSettings.Value["ShowMethodParameters"]=='1'
+      if monoSettings.Value["ShowMethodParameters"]=='' then
+        monoForm.miShowMethodParameters.Checked=true
+      else
+        monoForm.miShowMethodParameters.Checked=monoSettings.Value["ShowMethodParameters"]=='1'
+      end
     else
       monoForm.miShowMethodParameters.Checked=true
     end
   end
 
+  monoForm.OnDestroy=function(s)
+    if monoSettings then
+      monoSettings.Value['monoform.x']=s.left
+      monoSettings.Value['monoform.y']=s.top
+      monoSettings.Value['monoform.width']=s.width
+      monoSettings.Value['monoform.height']=s.height  
+    end
+  end
+
+  local newx=tonumber(monoSettings.Value['monoform.x'])
+  local newy=tonumber(monoSettings.Value['monoform.y'])
+  local newwidth=tonumber(monoSettings.Value['monoform.width'])
+  local newheight=tonumber(monoSettings.Value['monoform.height']) 
+  
+  if (newx and newx>getWorkAreaWidth()) then newx=nil end --make sure it stays within the workable area
+  if (newy and newy>getWorkAreaHeight()) then newy=nil end
+  
+  if newx and newy then monoForm.left=newx end
+  if newx and newy then monoForm.top=newy end
+  if newx and newy and newwidth then monoForm.width=newwidth end
+  if newx and newy and newheight then monoForm.height=newheight end
+ 
+  
   monoForm.show()
 
   monoForm.TV.Items.clear()
@@ -2535,8 +2988,12 @@ function mono_dissect()
 end
 
 function miMonoActivateClick(sender)
-  if LaunchMonoDataCollector()==0 then
-    showMessage(translate("Failure to launch"))
+  if monopipe then
+    monopipe.OnTimeout()
+  else  
+    if LaunchMonoDataCollector()==0 then
+      showMessage(translate("Failure to launch"))
+    end
   end
 end
 
@@ -2557,7 +3014,7 @@ function mono_OpenProcessMT(t)
   local m=enumModules()
   local i
   for i=1, #m do
-    if (m[i].Name=='mono.dll') or (string.sub(m[i].Name,1,5)=='mono-') then
+    if (m[i].Name=='mono.dll') or (string.sub(m[i].Name,1,5)=='mono-') or (m[i].Name=='GameAssembly.dll') or (m[i].Name=='UnityPlayer.dll')  then
       usesmono=true
       break
     end
@@ -2955,8 +3412,8 @@ mono_StringStruct=nil
   
 function monoform_exportStructInternal(s, caddr, recursive, static, structmap, makeglobal)
  -- print("monoform_exportStructInternal")
-  
-  if caddr==0 or caddr==nil then return nil end
+
+  if (monopipe==nil) or (caddr==0) or (caddr==nil) then return nil end
 
  -- print("b")
   
@@ -3072,7 +3529,11 @@ function monoform_exportArrayStructInternal(acs, arraytype, elemtype, recursive,
       structure_beginUpdate(acs)
       local ce=acs.addElement()
       ce.Name='Count'
-      ce.Offset=0xC
+      if targetIs64Bit() then
+        ce.Offset=0x18
+      else
+        ce.Offset=0xC
+      end
       ce.Vartype=vtDword
       ce.setChildStruct(cs)
       
@@ -3087,7 +3548,15 @@ function monoform_exportArrayStructInternal(acs, arraytype, elemtype, recursive,
       for j=0, 9 do -- Arbitrarily add 10 elements
         ce=acs.addElement()
         ce.Name=string.format("Item[%d]",j)
-        ce.Offset=j*psize+0x10
+        
+        local start
+        if targetIs64Bit() then
+          start=0x20
+        else
+          start=0x10
+        end
+          
+        ce.Offset=j*psize+start
         ce.Vartype=vtPointer
         ce.setChildStruct(cs)
       end
@@ -3214,6 +3683,8 @@ function monoAA_GETMONOSTATICDATA(assemblyname, namespace, classname, symbolpref
   --            symbolprefix = name of symbol prefix (sanitized classname used if nil)
 
   -- returns AA script for locating static data location for given structure
+  if monopipe.il2cpp then return end
+  
   local SYMCLASSNAME
   if assemblyname==nil or namespace==nil or classname==nil then
     return ''
@@ -3226,7 +3697,95 @@ function monoAA_GETMONOSTATICDATA(assemblyname, namespace, classname, symbolpref
   -- Populates ###.Static and ###.Class where ### the symbol prefix
   local script_tmpl
   if enable then
-    script_tmpl = [===[
+    if targetIs64Bit() then
+      script_tmpl = [===[
+label($SYMCLASSNAME$.threadexit)
+label(classname)
+label(namespace)
+label(assemblyname)
+label(status)
+label(domain)
+label(assembly)
+label($SYMCLASSNAME$.Static)
+label($SYMCLASSNAME$.Class)
+alloc($SYMCLASSNAME$.threadstart, 2048, mono.mono_thread_attach)
+
+registersymbol($SYMCLASSNAME$.Static)
+registersymbol($SYMCLASSNAME$.Class)
+
+$SYMCLASSNAME$.threadstart:
+sub rsp,28
+
+xor rax,rax
+mov [$SYMCLASSNAME$.Class],rax
+mov [$SYMCLASSNAME$.Static],rax
+
+call mono.mono_get_root_domain
+cmp rax,0
+je $SYMCLASSNAME$.threadexit
+mov [domain],rax
+
+mov rcx,[domain]
+call mono.mono_thread_attach
+
+mov rcx,assemblyname
+mov rdx,status
+call mono.mono_assembly_load_with_partial_name
+cmp rax,0
+je $SYMCLASSNAME$.threadexit
+
+mov rcx,rax
+call mono.mono_assembly_get_image
+cmp rax,0
+je $SYMCLASSNAME$.threadexit
+mov [assembly], rax
+
+mov rcx,eax
+mov rdx,namespace
+mov r8,classname
+
+call mono.mono_class_from_name_case
+cmp rax,0
+je $SYMCLASSNAME$.threadexit
+mov [$SYMCLASSNAME$.Class],rax
+
+mov rcx,[domain]
+mov rdx,rax
+call mono.mono_class_vtable
+cmp rax,0
+je $SYMCLASSNAME$.threadexit
+
+mov rcx,rax
+call mono.mono_vtable_get_static_field_data
+
+mov [$SYMCLASSNAME$.Static],rax
+jmp $SYMCLASSNAME$.threadexit
+///////////////////////////////////////////////////////
+// Data section
+$SYMCLASSNAME$.Static:
+dq 0
+$SYMCLASSNAME$.Class:
+dq 0
+assemblyname:
+db '$ASSEMBLYNAME$',0
+namespace:
+db '$NAMESPACE$',0
+classname:
+db '$CLASSNAME$',0
+status:
+dq 0
+domain:
+dq 0
+assembly:
+dq 0
+
+$SYMCLASSNAME$.threadexit:
+add rsp,28
+ret
+createthread($SYMCLASSNAME$.threadstart)
+]===]
+    else
+      script_tmpl = [===[
 label($SYMCLASSNAME$.threadexit)
 label(classname)
 label(namespace)
@@ -3311,6 +3870,7 @@ $SYMCLASSNAME$.threadexit:
 ret
 createthread($SYMCLASSNAME$.threadstart)
 ]===]
+    end
   else
     script_tmpl = [===[
 unregistersymbol($SYMCLASSNAME$.Static)
@@ -3333,6 +3893,8 @@ function monoAA_GETMONOSTATICFIELDDATA(assemblyname, namespace, classname, field
   --            symbolprefix = name of symbol prefix (sanitized classname used if nil)
 
   -- returns AA script for locating static data location for given structure
+  if monopipe.il2cpp then return end  
+  
   local SYMCLASSNAME
   if assemblyname==nil or namespace==nil or classname==nil or fieldname==nil then
     return ''

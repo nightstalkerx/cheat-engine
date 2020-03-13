@@ -5,33 +5,13 @@
  *      Author: erich
  */
 
-#include "vmmhelper.h"
+
 
 #ifndef VMM_EPTHANDLER_H_
 #define VMM_EPTHANDLER_H_
 
-typedef union _EPT_VIOLATION_INFO
-{
-  QWORD ExitQualification;
-  struct{
-    unsigned R        :  1; // 0: Read Access
-    unsigned W        :  1; // 1: Write Access
-    unsigned X        :  1; // 2: Execute access (supervisor mode in mode-based execute control for EPT)
-    unsigned ANDb0    :  1; //
-    unsigned ANDb1    :  1; //
-    unsigned ANDb2    :  1; //
-    unsigned ANDb10   :  1; // if mode-based execute control else undefined
-    unsigned GuestLinearAddressValid: 1;
-    unsigned AddressAccess: 1; //if GuestLinearAddressValid then 1 if the access was to a page, 0 if it was in the paging system
-    //only defined if GuestLinearAddressValid & AddressAccess == 1 and advanced VM-exit information for EPT violations
-    unsigned supervisor     : 1; //1 if supervisor, 0 if usermode
-    unsigned pagingreadonly : 1; //1 if paged as read only, 0 if read/write
-    unsigned XD             : 1; //1 if execute disable, 0 if executable
-    unsigned NMIUnblockedDueToIRET : 1; //
-    unsigned reserved1      : 19;
-    DWORD reserved2;
-  };
-} __attribute__((__packed__)) EPT_VIOLATION_INFO, *PEPT_VIOLATION_INFO;
+#include "vmmhelper.h"
+#include "eptstructs.h"
 
 
 #define MTC_UC  0
@@ -40,11 +20,44 @@ typedef union _EPT_VIOLATION_INFO
 #define MTC_WP  5
 #define MTC_WB  6
 
+#define EPTO_MULTIPLERIP    (1<<0) //log the same RIP multiple times (if different registers)
+#define EPTO_LOG_ALL        (1<<1) //log every access in the page
+#define EPTO_SAVE_XSAVE     (1<<2) //logs contain the xsave state
+#define EPTO_SAVE_STACK     (1<<3) //logs contain a 4kb stack snapshot
+#define EPTO_PMI_WHENFULL   (1<<4) //triggers a PMI when full
+#define EPTO_GROW_WHENFULL  (1<<5) //grows the buffer when full
+#define EPTO_INTERRUPT      (1<<6) //raise interrupt on match instead of log
+
+#define EPTW_WRITE 0
+#define EPTW_READWRITE 1
+#define EPTW_EXECUTE 2
+
 
 void initMemTypeRanges();
 
-int handleEPTViolation(pcpuinfo currentcpuinfo, VMRegisters *vmregisters);
-int handleEPTMisconfig(pcpuinfo currentcpuinfo, VMRegisters *vmregisters);
+VMSTATUS handleEPTViolation(pcpuinfo currentcpuinfo, VMRegisters *vmregisters, PFXSAVE64 fxsave);
+VMSTATUS handleEPTMisconfig(pcpuinfo currentcpuinfo, VMRegisters *vmregisters);
+int ept_handleWatchEventAfterStep(pcpuinfo currentcpuinfo, int ID);
+int ept_handleCloakEventAfterStep(pcpuinfo currentcpuinfo, PCloakedPageData cloakdata);
+int ept_handleSoftwareBreakpointAfterStep(pcpuinfo currentcpuinfo,  int ID);
 
+int ept_watch_activate(QWORD PhysicalAddress, int Size, int Type, DWORD Options, int MaxEntryCount, int *outID);
+int ept_watch_deactivate(int ID);
+VMSTATUS ept_watch_retrievelog(int ID, QWORD results, DWORD *resultSize, DWORD *offset, QWORD *errorcode);
+//int ept_activateWatch(pcpuinfo currentcpuinfo, int ID);
+
+
+
+int ept_cloak_activate(QWORD physicalAddress);
+int ept_cloak_deactivate(QWORD physicalAddress);
+int ept_cloak_readOriginal(pcpuinfo currentcpuinfo, VMRegisters *registers, QWORD physicalAddress, QWORD destination);
+int ept_cloak_writeOriginal(pcpuinfo currentcpuinfo, VMRegisters *registers, QWORD physicalAddress, QWORD source);
+int ept_cloak_changeregonbp(QWORD physicalAddress, PCHANGEREGONBPINFO changereginfo);
+int ept_cloak_removechangeregonbp(QWORD physicalAddress);
+BOOL ept_handleSoftwareBreakpoint(pcpuinfo currentcpuinfo, VMRegisters *vmregisters, FXSAVE64 *fxsave);
+
+void ept_reset();
+void ept_invalidate();
+void vpid_invalidate();
 
 #endif /* VMM_EPTHANDLER_H_ */

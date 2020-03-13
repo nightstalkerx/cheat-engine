@@ -19,6 +19,7 @@
 
 #include "epthandler.h"
 #include "neward.h"
+#include "displaydebug.h"
 
 
 criticalSection setupVMX_lock;
@@ -382,6 +383,188 @@ void setupVMX_AMD(pcpuinfo currentcpuinfo)
 
 }
 
+
+int vmx_enableProcBasedFeature(DWORD PBF)
+{
+  if (((IA32_VMX_PROCBASED_CTLS >> 32) & PBF) == PBF) //can it be set
+  {
+    vmwrite(vm_execution_controls_cpu, vmread(vm_execution_controls_cpu) | PBF);
+    return 1;
+  }
+  else
+    return 0;
+}
+
+int vmx_disableProcBasedFeature(DWORD PBF)
+{
+  QWORD PBCTLS=IA32_VMX_PROCBASED_CTLS;
+
+  if (IA32_VMX_BASIC.default1canbe0)
+    PBCTLS=readMSR(IA32_VMX_TRUE_PROCBASED_CTLS_MSR);
+
+
+  if (PBCTLS & PBF) //can it be set to 0
+    return 0; //nope
+  else
+  {
+    vmwrite(vm_execution_controls_cpu, vmread(vm_execution_controls_cpu) & (~PBF));
+    return 1;
+  }
+}
+
+int vmx_enablePinBasedFeature(DWORD PINBF)
+{
+  if (((IA32_VMX_PINBASED_CTLS >> 32) & PINBF) == PINBF) //can it be set
+  {
+    vmwrite(vm_execution_controls_pin, vmread(vm_execution_controls_pin) | PINBF);
+    return 1;
+  }
+  else
+    return 0;
+}
+
+int vmx_disablePinBasedFeature(DWORD PINBF)
+{
+  QWORD PINBCTLS=IA32_VMX_PINBASED_CTLS;
+
+  if (IA32_VMX_BASIC.default1canbe0)
+    PINBCTLS=readMSR(IA32_VMX_TRUE_PINBASED_CTLS_MSR);
+
+
+  if (PINBCTLS & PINBF) //can it be set to 0
+    return 0; //nope
+  else
+  {
+    vmwrite(vm_execution_controls_pin, vmread(vm_execution_controls_pin) & (~PINBF));
+    return 1;
+  }
+}
+
+int vmx_enableNMIWindowExiting(void)
+{
+  if (vmx_enableProcBasedFeature(PBEF_NMI_WINDOW_EXITING))
+  {
+    //PBEF_NMI_WINDOW_EXITING can be set
+    //"If the “virtual NMIs” VM-execution control is 0, the “NMI-window exiting” VM-execution control must be 0."
+    //so virtual NMIs must be 1 as well
+    if (vmx_enablePinBasedFeature(PINBEF_VIRTUAL_NMIS))
+    {
+      //"If the “NMI exiting” VM-execution control is 0, the “virtual NMIs” VM-execution control must be 0"
+      //so also enable NMI exiting
+      if (vmx_enablePinBasedFeature(PINBEF_NMI_EXITING))
+        return 1;
+
+      vmx_disablePinBasedFeature(PINBEF_VIRTUAL_NMIS);
+    }
+
+    vmx_disableProcBasedFeature(PBEF_NMI_WINDOW_EXITING);
+  }
+
+  return 0;
+}
+
+int vmx_disableNMIWindowExiting(void)
+{
+  int a,b,c;
+  a=vmx_disableProcBasedFeature(PBEF_NMI_WINDOW_EXITING);
+  b=vmx_disablePinBasedFeature(PINBEF_VIRTUAL_NMIS);
+  c=vmx_disablePinBasedFeature(PINBEF_NMI_EXITING);
+
+  return (a+b+c==3);
+}
+
+int vmx_addSingleSteppingReasonEx(pcpuinfo currentcpuinfo, int reason, void *data)
+{
+  if (currentcpuinfo->singleStepping.ReasonsPos>=currentcpuinfo->singleStepping.ReasonsLength) //realloc
+  {
+    currentcpuinfo->singleStepping.ReasonsLength=(currentcpuinfo->singleStepping.ReasonsLength+2)*2;
+    currentcpuinfo->singleStepping.Reasons=realloc(currentcpuinfo->singleStepping.Reasons, currentcpuinfo->singleStepping.ReasonsLength * sizeof(SingleStepReason));
+  }
+
+  //always add to the end
+  if (currentcpuinfo->singleStepping.ReasonsPos>=1)
+  {
+    sendstringf("Multiple single stepping reasons\n");
+  }
+
+  currentcpuinfo->singleStepping.Reasons[currentcpuinfo->singleStepping.ReasonsPos].Reason=reason;
+  currentcpuinfo->singleStepping.Reasons[currentcpuinfo->singleStepping.ReasonsPos].Data=data;
+  currentcpuinfo->singleStepping.ReasonsPos++;
+
+  return currentcpuinfo->singleStepping.ReasonsPos-1;
+
+}
+
+int vmx_addSingleSteppingReason(pcpuinfo currentcpuinfo, int reason, int ID)
+{
+  if (currentcpuinfo->singleStepping.ReasonsPos>=currentcpuinfo->singleStepping.ReasonsLength) //realloc
+  {
+    currentcpuinfo->singleStepping.ReasonsLength=(currentcpuinfo->singleStepping.ReasonsLength+2)*2;
+    currentcpuinfo->singleStepping.Reasons=realloc(currentcpuinfo->singleStepping.Reasons, currentcpuinfo->singleStepping.ReasonsLength * sizeof(SingleStepReason));
+  }
+
+  //always add to the end
+  if (currentcpuinfo->singleStepping.ReasonsPos>=1)
+  {
+    sendstringf("Multiple single stepping reasons\n");
+  }
+
+  currentcpuinfo->singleStepping.Reasons[currentcpuinfo->singleStepping.ReasonsPos].Reason=reason;
+  currentcpuinfo->singleStepping.Reasons[currentcpuinfo->singleStepping.ReasonsPos].ID=ID;
+  currentcpuinfo->singleStepping.ReasonsPos++;
+
+  return currentcpuinfo->singleStepping.ReasonsPos-1;
+}
+
+int vmx_enableSingleStepMode(void)
+{
+  pcpuinfo c=getcpuinfo();
+  sendstring("Enabling single step mode\n");
+
+ /* if ((vmread(vm_entry_interruptioninfo) >> 31)==0)
+    vmwrite(vm_guest_interruptability_state,2); //execute at least one instruction
+  else
+    sendstringf("Not setting the interruptability state\n");*/
+
+  if (vmx_enableProcBasedFeature(PBEF_MONITOR_TRAP_FLAG))
+  {
+    sendstring("Using the monitor trap flag\n");
+    c->singleStepping.Method=1;
+    return 1;
+  }
+  else
+  {
+    c->singleStepping.Method=2;
+    if (vmx_enableProcBasedFeature(PBEF_INTERRUPT_WINDOW_EXITING))
+    {
+      if ((vmread(vm_entry_interruptioninfo) >> 31)==0) //if no interrupt pending
+        vmwrite(vm_guest_interruptability_state,2); //execute at least one instruction
+      //else go to that interrupt that is pending and then stop
+
+      sendstring("Using the interrupt window\n");
+      return 1;
+    }
+  }
+
+  return 0;
+}
+
+int vmx_disableSingleStepMode(void)
+{
+  int r=0;
+  pcpuinfo c=getcpuinfo();
+
+  sendstring("Disabling single step mode\n");
+
+  if (c->singleStepping.Method==1)
+    r=vmx_disableProcBasedFeature(PBEF_MONITOR_TRAP_FLAG);
+
+  if (c->singleStepping.Method==2)
+    r=vmx_disableProcBasedFeature(PBEF_INTERRUPT_WINDOW_EXITING);
+
+  return r;
+}
+
 //stealthedit:
 //mark page as execute, but not as read/write
 //on read/write undo change, set TF, run, wait till int1/first vm exit(what about ints? Enable external int exiting), unset TF, redo change, run
@@ -389,7 +572,6 @@ void setupVMX_AMD(pcpuinfo currentcpuinfo)
 //on systems with no exec only
 //alt1: mark as read/write but not exec. on ept exit change RIP to adjusted copy
 //alt2: mark as no access. on ept exit set TF
-
 int setupEPT(pcpuinfo currentcpuinfo)
 {
   //check for Secondary Processor-Based VM-Execution Controls
@@ -398,6 +580,7 @@ int setupEPT(pcpuinfo currentcpuinfo)
   sendstring("setupEPT\n");
 
   hasEPTsupport=0;
+  //return 0; //<-------------DEBUG
 
   if (IA32_VMX_PROCBASED_CTLS >> 63)
   {
@@ -415,8 +598,17 @@ int setupEPT(pcpuinfo currentcpuinfo)
       DWORD secondarycontrols=vmread(vm_execution_controls_cpu_secondary);
 
       sendstringf("SPBEF_ENABLE_EPT can be set\n");
-
       secondarycontrols=secondarycontrols | SPBEF_ENABLE_EPT;
+
+      if ((IA32_VMX_SECONDARY_PROCBASED_CTLS>>32) & SPBEF_ENABLE_VPID)
+      {
+    	  sendstringf("SPBEF_ENABLE_VPID can also be set\n");
+    	  secondarycontrols=secondarycontrols | SPBEF_ENABLE_VPID;
+    	  vmwrite(vm_vpid,1); //vpid
+
+    	  hasVPIDSupport=1;
+      }
+
       vmwrite(vm_execution_controls_cpu_secondary, secondarycontrols);
 
       //setup the EPT ptr
@@ -446,6 +638,16 @@ int setupEPT(pcpuinfo currentcpuinfo)
       eptinfo.IA32_VMX_VPID_EPT_CAP=readMSR(IA32_VMX_EPT_VPID_CAP_MSR);
       has_EPT_1GBsupport=eptinfo.EPT_1GBSupport;
       has_EPT_2MBSupport=eptinfo.EPT_2MBSupport;
+      has_EPT_ExecuteOnlySupport=eptinfo.EPT_executeOnlySupport;
+
+      has_EPT_INVEPTSingleContext=eptinfo.EPT_INVEPTSingleContext;
+      has_EPT_INVEPTAllContext=eptinfo.EPT_INVEPTAllContext;
+
+      has_VPID_INVVPIDIndividualAddress=eptinfo.VPID_INVVPIDIndividualAddress;
+      has_VPID_INVVPIDSingleContext=eptinfo.VPID_INVVPIDSingleContext;
+      has_VPID_INVVPIDAllContext=eptinfo.VPID_INVVPIDAllContext;
+      has_VPID_INVVPIDSingleContextRetainingGlobals=eptinfo.VPID_INVVPIDAllContext;
+
       //eptinfo
 
       QWORD rax=1,rbx=0,rcx=0,rdx=0;
@@ -478,15 +680,14 @@ int setupEPT(pcpuinfo currentcpuinfo)
   return 0;
 }
 
-void setup8086WaitForSIPI(pcpuinfo currentcpuinfo)
+void setup8086WaitForSIPI(pcpuinfo currentcpuinfo, int setupvmcontrols)
 {
   //8086 entry (wait-for-sipi)
   Access_Rights reg_csaccessrights,reg_segaccessrights;
   DWORD gdtbase, idtbase;
 
 
-  gdtbase=VirtualToPhysical((void *)getGDTbase());
-  idtbase=VirtualToPhysical(idttable32);
+
 
   sendstringf("entering sleepmode for ap cpu\n");
 
@@ -512,6 +713,9 @@ void setup8086WaitForSIPI(pcpuinfo currentcpuinfo)
   }
   else
   {
+    gdtbase=VirtualToPhysical((void *)getGDTbase());
+    idtbase=VirtualToPhysical(idttable32);
+
     reg_csaccessrights.AccessRights=0;
     reg_csaccessrights.Segment_type=3;
     reg_csaccessrights.S=1;
@@ -528,55 +732,60 @@ void setup8086WaitForSIPI(pcpuinfo currentcpuinfo)
   currentcpuinfo->hasIF=0;
 
 
-  DWORD new_vm_execution_controls_cpu=vmread(vm_execution_controls_cpu) | (UINT64)IA32_VMX_PROCBASED_CTLS | USE_IO_BITMAPS | USE_MSR_BITMAPS;
-
-  if ((IA32_VMX_PROCBASED_CTLS >> 32) & (1<<31)) //secondary procbased ctl support
-    new_vm_execution_controls_cpu=new_vm_execution_controls_cpu | (1<<31);
-
-
-  vmwrite(vm_execution_controls_cpu, new_vm_execution_controls_cpu);
-  if ((new_vm_execution_controls_cpu >> 31) & 1)
+  if (setupvmcontrols) //not needed when receiving an INIT, and todo: shouldn't be needed anymore as the cpu is already running
   {
-    //it has a secondary entry
-    //enable rdtscp
-    QWORD secondarycpu=vmread(vm_execution_controls_cpu_secondary);
+    DWORD new_vm_execution_controls_cpu=vmread(vm_execution_controls_cpu) | (UINT64)IA32_VMX_PROCBASED_CTLS | USE_IO_BITMAPS | USE_MSR_BITMAPS;
+
+    if ((IA32_VMX_PROCBASED_CTLS >> 32) & (1<<31)) //secondary procbased ctl support
+      new_vm_execution_controls_cpu=new_vm_execution_controls_cpu | (1<<31);
 
 
-    if ((IA32_VMX_SECONDARY_PROCBASED_CTLS >> 32) & SPBEF_ENABLE_RDTSCP) //can it enable rdtscp ?
+    vmwrite(vm_execution_controls_cpu, new_vm_execution_controls_cpu);
+    if ((new_vm_execution_controls_cpu >> 31) & 1)
     {
-      sendstringf("Enabling rdtscp\n");
-      secondarycpu|=SPBEF_ENABLE_RDTSCP;
+      //it has a secondary entry
+      //enable rdtscp
+      QWORD secondarycpu=vmread(vm_execution_controls_cpu_secondary);
+
+
+      if ((IA32_VMX_SECONDARY_PROCBASED_CTLS >> 32) & SPBEF_ENABLE_RDTSCP) //can it enable rdtscp ?
+      {
+        sendstringf("Enabling rdtscp\n");
+        secondarycpu|=SPBEF_ENABLE_RDTSCP;
+      }
+
+
+
+      if ((IA32_VMX_SECONDARY_PROCBASED_CTLS >> 32) & SPBEF_ENABLE_XSAVES) //can it enable XSAVES ?
+      {
+        sendstringf("Enabling xsaves\n");
+        secondarycpu|=SPBEF_ENABLE_XSAVES;
+      }
+
+      if ((IA32_VMX_SECONDARY_PROCBASED_CTLS >> 32) & SPBEF_ENABLE_INVPCID) //can it enable INVPCID ?
+      {
+        sendstringf("Enabling INVPCID\n");
+        secondarycpu|=SPBEF_ENABLE_INVPCID;
+      }
+
+      vmwrite(vm_execution_controls_cpu_secondary, secondarycpu);
+
     }
 
 
 
-    if ((IA32_VMX_SECONDARY_PROCBASED_CTLS >> 32) & SPBEF_ENABLE_XSAVES) //can it enable XSAVES ?
-    {
-      sendstringf("Enabling xsaves\n");
-      secondarycpu|=SPBEF_ENABLE_XSAVES;
-    }
+    vmwrite(vm_entry_controls,vmread(vm_entry_controls) | (UINT64)IA32_VMX_ENTRY_CTLS ); //32bit/16bit init
 
-    if ((IA32_VMX_SECONDARY_PROCBASED_CTLS >> 32) & SPBEF_ENABLE_INVPCID) //can it enable INVPCID ?
-    {
-      sendstringf("Enabling INVPCID\n");
-      secondarycpu|=SPBEF_ENABLE_INVPCID;
-    }
-
-    vmwrite(vm_execution_controls_cpu_secondary, secondarycpu);
-
+    vmwrite(vm_cr0_read_shadow,0x10); //cr0 read shadow
+    vmwrite(vm_cr4_read_shadow,(UINT64)0); //cr4 read shadow
+    vmwrite(vm_cr3_targetvalue0,(UINT64)0xffffffffffffffffULL); //cr3-target value 0
   }
-
-
-
-  vmwrite(vm_entry_controls,vmread(vm_entry_controls) | (UINT64)IA32_VMX_ENTRY_CTLS ); //32bit/16bit init
-
-  vmwrite(vm_cr0_read_shadow,0x10); //cr0 read shadow
-  vmwrite(vm_cr4_read_shadow,(UINT64)0); //cr4 read shadow
-  vmwrite(vm_cr3_targetvalue0,(UINT64)0xffffffffffffffffULL); //cr3-target value 0
-
 
   if (hasUnrestrictedSupport)
   {
+    vmwrite(vm_cr0_read_shadow,0x10); //cr0 read shadow
+    vmwrite(vm_cr4_read_shadow,(UINT64)0); //cr4 read shadow
+
     vmwrite(vm_guest_cr0, 0x10 | (IA32_VMX_CR0_FIXED0 & 0xFFFFFFFF7FFFFFFEULL)); //no pg, or PE
     vmwrite(vm_guest_cr4, IA32_VMX_CR4_FIXED0);
 
@@ -598,7 +807,7 @@ void setup8086WaitForSIPI(pcpuinfo currentcpuinfo)
 
 
   vmwrite(vm_guest_es,(UINT64)0); //es selector
-  vmwrite(vm_guest_cs,(UINT64)0x2000); //cs selector
+  vmwrite(vm_guest_cs,(UINT64)0xf000); //cs selector
   vmwrite(vm_guest_ss,(UINT64)0); //ss selector
   vmwrite(vm_guest_ds,(UINT64)0); //ds selector
   vmwrite(vm_guest_fs,(UINT64)0); //fs selector
@@ -612,14 +821,26 @@ void setup8086WaitForSIPI(pcpuinfo currentcpuinfo)
   vmwrite(vm_guest_ds_limit,(UINT64)0xffff); //ds limit
   vmwrite(vm_guest_fs_limit,(UINT64)0xffff); //fs limit
   vmwrite(vm_guest_gs_limit,(UINT64)0xffff); //gs limit
-  vmwrite(vm_guest_ldtr_limit,(UINT64)0); //ldtr limit
+
   if (hasUnrestrictedSupport)
+  {
+    vmwrite(vm_guest_ldtr_limit,(UINT64)0xffff); //ldtr limit
     vmwrite(vm_guest_tr_limit,0xffff); //tr limit
+  }
   else
+  {
+    vmwrite(vm_guest_ldtr_limit,(UINT64)0); //ldtr limit
     vmwrite(vm_guest_tr_limit,(ULONG)sizeof(TSS)+32+8192+1); //tr limit
+  }
 
   vmwrite(vm_guest_es_base,(UINT64)0); //es base
-  vmwrite(vm_guest_cs_base,(UINT64)0x20000); //cs base
+  if (hasUnrestrictedSupport)
+    vmwrite(vm_guest_cs_base,(UINT64)0xffff0000); //cs base
+  else
+    vmwrite(vm_guest_cs_base,(UINT64)0xf0000); //cs base
+
+
+
   vmwrite(vm_guest_ss_base,(UINT64)0); //ss base
   vmwrite(vm_guest_ds_base,(UINT64)0); //ds base
   vmwrite(vm_guest_fs_base,(UINT64)0); //fs base
@@ -637,10 +858,11 @@ void setup8086WaitForSIPI(pcpuinfo currentcpuinfo)
   vmwrite(vm_guest_ds_access_rights,(UINT64)reg_segaccessrights.AccessRights); //ds access rights
   vmwrite(vm_guest_fs_access_rights,(UINT64)reg_segaccessrights.AccessRights); //fs access rights
   vmwrite(vm_guest_gs_access_rights,(UINT64)reg_segaccessrights.AccessRights); //gs access rights
- // if (hasUnrestrictedSupport)
-    //vmwrite(vm_guest_ldtr_access_rights,0); //ldtr access rights (bit 16 is unusable bit
-  //else
+  if (hasUnrestrictedSupport)
+    vmwrite(vm_guest_ldtr_access_rights,0x82); //ldtr access rights
+  else
     vmwrite(vm_guest_ldtr_access_rights,(UINT64)(1<<16)); //ldtr access rights (bit 16 is unusable bit
+
   vmwrite(vm_guest_tr_access_rights,0x8b); //tr access rights
 
 
@@ -673,10 +895,61 @@ void setup8086WaitForSIPI(pcpuinfo currentcpuinfo)
 
     setupNonPagedPaging(currentcpuinfo);
   }
+  else
+  {
+    vmwrite(vm_guest_cr3,0);
+  }
+
+  currentcpuinfo->efer=0;
+  vmwrite(vm_entry_controls, vmread(vm_entry_controls) & (~VMENTRYC_IA32E_MODE_GUEST));
+
 
   vmwrite(vm_guest_rflags,guestrflags.value ); //rflag
 }
 
+void vmx_setMSRReadExit(DWORD msrValue)
+{
+  if (msrValue<0xc0000000)
+    MSRBitmap[msrValue/8]|=1 << (msrValue % 8);
+  else
+  {
+    msrValue=msrValue-0xc0000000;
+    MSRBitmap[1024+msrValue/8]|=1 << (msrValue % 8);
+  }
+}
+
+void vmx_removeMSRReadExit(DWORD msrValue)
+{
+  if (msrValue<0xc0000000)
+    MSRBitmap[msrValue/8]&=~(1 << (msrValue % 8));
+  else
+  {
+    msrValue=msrValue-0xc0000000;
+    MSRBitmap[1024+msrValue/8]&=~(1 << (msrValue % 8));
+  }
+}
+
+void vmx_setMSRWriteExit(DWORD msrValue)
+{
+  if (msrValue<0xc0000000)
+    MSRBitmap[2048+msrValue/8]|=1 << (msrValue % 8);
+  else
+  {
+    msrValue=msrValue-0xc0000000;
+    MSRBitmap[3072+msrValue/8]|=1 << (msrValue % 8);
+  }
+}
+
+void vmx_removeMSRWriteExit(DWORD msrValue)
+{
+  if (msrValue<0xc0000000)
+    MSRBitmap[2048+msrValue/8]&=~(1 << (msrValue % 8));
+  else
+  {
+    msrValue=msrValue-0xc0000000;
+    MSRBitmap[3072+msrValue/8]&=~(1 << (msrValue % 8));
+  }
+}
 
 void setupVMX(pcpuinfo currentcpuinfo)
 {
@@ -709,46 +982,34 @@ void setupVMX(pcpuinfo currentcpuinfo)
 
     //MSRBitmap layout:
     //0000-1023: Read bitmap for low MSRs
-    //1024-2047: Write bitmap for low MSRs
-    //2048-3071: Read bitmap for high MSRs
+    //1024-2047: read bitmap for high  MSRs
+    //2048-3071: write bitmap for low MSRs
     //3072-4095: Write bitmap for high MSRs
-
-
-   // MSRBitmap[0x17a/8]|=1 << (0x17a % 8);
-
 
     //set it to break on msr's handling sysenter
     //read for sysenter
-    MSRBitmap[0x174/8]|=1 << (0x174 % 8);
-    MSRBitmap[0x175/8]|=1 << (0x175 % 8);
-    MSRBitmap[0x176/8]|=1 << (0x176 % 8);
+
+    vmx_setMSRReadExit(0x174);
+    vmx_setMSRReadExit(0x175);
+    vmx_setMSRReadExit(0x176);
+
+    vmx_setMSRWriteExit(0x174);
+    vmx_setMSRWriteExit(0x175);
+    vmx_setMSRWriteExit(0x176);
 
 
-    //write for sysenter
-    MSRBitmap[2048+0x174/8]|=1 << (0x174 % 8);
-    MSRBitmap[2048+0x175/8]|=1 << (0x175 % 8);
-    MSRBitmap[2048+0x176/8]|=1 << (0x176 % 8);
-
-
-    //read for 0xc0000080  (EFER)
-    MSRBitmap[1024+0x80/8]=1 << (0x80 % 8);
-
-    //write for 0xc0000080
-    MSRBitmap[3072+0x80/8]=1 << (0x80 % 8);
-
+    vmx_setMSRReadExit(0xc0000080);
+    vmx_setMSRWriteExit(0xc0000080);
 
     //break on IA32_FEATURE_CONTROL_MSR read and write
-    //read
-    MSRBitmap[IA32_FEATURE_CONTROL_MSR/8]|=1 << (IA32_FEATURE_CONTROL_MSR % 8);
-
-    //write
-    MSRBitmap[IA32_FEATURE_CONTROL_MSR/8]|=1 << (IA32_FEATURE_CONTROL_MSR % 8);
+    vmx_setMSRReadExit(IA32_FEATURE_CONTROL_MSR);
+    vmx_setMSRWriteExit(IA32_FEATURE_CONTROL_MSR);
 
 
 
 
 
-    /*
+    /* todo perhaps
     //break on writes to mttr msr's
     for (i=0x200; i<0x20f; i++)
        MSRBitmap[1024+i/8]=1 << (i % 8);
@@ -764,6 +1025,8 @@ void setupVMX(pcpuinfo currentcpuinfo)
     MSRBitmap[1024+0x2ff/8]=1 << (0x2ff % 8);
     */
   }
+
+  SetPageToWriteThrough((void *)MSRBitmap); //for future updates
 
 
   if (IOBitmap==NULL)
@@ -903,28 +1166,28 @@ void setupVMX(pcpuinfo currentcpuinfo)
 
   sendstringf("Set vm_execution_controls_pin to %8 (became %8)\n", (ULONG)IA32_VMX_PINBASED_CTLS, (DWORD)vmread(vm_execution_controls_pin));
 
-#ifdef DEBUG
-/*
 
+#if DISPLAYDEBUG==1
   //check if the system supports preemption, and if so, enable it
   {
     ULONG usablepinbasedBits=(IA32_VMX_PINBASED_CTLS >> 32);
     if (usablepinbasedBits & ACTIVATE_VMX_PREEMPTION_TIMER)
     {
       displayline("Preemption is possible\n");
-      vmwrite(vm_execution_controls_pin,(ULONG)IA32_VMX_PINBASED_CTLS | ACTIVATE_VMX_PREEMPTION_TIMER);
-      vmwrite(vm_preemption_timer_value,IA32_VMX_MISC.vmx_premption_timer_tsc_relation*100000);
+      vmwrite(vm_execution_controls_pin,vmread(vm_execution_controls_pin) | ACTIVATE_VMX_PREEMPTION_TIMER);
+      vmwrite(vm_preemption_timer_value,10000);
     }
-
   }
-*/
-
 #endif
 
+
+  globalTSC=_rdtsc();
 
 
 
   vmwrite(0x4004,(UINT64)0xffff); //exception bitmap (0xffff=0-15 0xffffffff=0-31)
+
+ // vmwrite(0x4004,(UINT64)0);
   vmwrite(0x4006,(UINT64)0); //page fault error-code mask
   vmwrite(0x4008,(UINT64)0); //page fault error-code match
   vmwrite(0x400a,(UINT64)1); //cr3-target count
@@ -973,7 +1236,7 @@ void setupVMX(pcpuinfo currentcpuinfo)
 
 
   vmwrite(0x4014,(UINT64)0); //vm-entry msr-load count
-  vmwrite(0x4016,(UINT64)0); //vm-entry interruption-information field
+  vmwrite(vm_entry_interruptioninfo,(UINT64)0); //vm-entry interruption-information field
   vmwrite(0x4018,(UINT64)0); //vm-entry exception error code
   vmwrite(0x401a,(UINT64)0); //vm-entry instruction length
   vmwrite(0x401c,(UINT64)0); //TPR threshold
@@ -1002,10 +1265,10 @@ void setupVMX(pcpuinfo currentcpuinfo)
   vmwrite(0x600e,(UINT64)0); //cr3-target value 3
 
   //if useEPT  (the user might want to save that memory)
-  int eptconfigured=setupEPT(currentcpuinfo); //needed for unrestricted guest and could be useful for other things (like protecting the memory of DBVM)
+  hasEPTsupport=setupEPT(currentcpuinfo); //needed for unrestricted guest and could be useful for other things (like protecting the memory of DBVM)
 
 
-  if (eptconfigured)
+  if (hasEPTsupport)
   {
     //try setting unrestricted guest
     if ( ((IA32_VMX_SECONDARY_PROCBASED_CTLS>>32) & SPBEF_ENABLE_UNRESTRICTED ) &&
@@ -1031,7 +1294,8 @@ void setupVMX(pcpuinfo currentcpuinfo)
       MSRBitmap[1024+0x80/8]&=~(1 << (0x80 % 8)); //read
       MSRBitmap[3072+0x80/8]&=~(1 << (0x80 % 8)); //write
 
-      vmwrite(vm_cr0_guest_host_mask,(UINT64)IA32_VMX_CR0_FIXED0 & 0xFFFFFFFF7FFFFFFEULL); //cr0 guest/host mask 1=guest owned
+      //vmwrite(vm_cr0_guest_host_mask,(UINT64)IA32_VMX_CR0_FIXED0 & 0xFFFFFFFF7FFFFFFEULL); //cr0 guest/host mask 1=guest owned
+      vmwrite(vm_cr0_guest_host_mask,(UINT64)0xFFFFFFFF7FFFFFFEULL);
       vmwrite(vm_cr4_guest_host_mask,(UINT64)IA32_VMX_CR4_FIXED0); //same with cr4 but do guard the VMX bit
     }
     else
@@ -1040,6 +1304,19 @@ void setupVMX(pcpuinfo currentcpuinfo)
       hasUnrestrictedSupport=0;
     }
   }
+
+#ifdef TSCHOOK
+  {
+    if ((readMSR(IA32_VMX_PROCBASED_CTLS_MSR)>>32) & RDTSC_EXITING)
+      vmwrite(vm_execution_controls_cpu, vmread(vm_execution_controls_cpu) | RDTSC_EXITING);
+
+    vmx_setMSRReadExit(IA32_TIME_STAMP_COUNTER);
+    vmx_setMSRWriteExit(IA32_TIME_STAMP_COUNTER);
+
+    vmx_setMSRWriteExit(IA32_TSC_ADJUST);
+  }
+#endif
+
 
 
   //----------------GUEST SETUP----------------
@@ -1125,6 +1402,10 @@ void setupVMX(pcpuinfo currentcpuinfo)
       if ((IA32_VMX_PROCBASED_CTLS >> 32) & (1<<31)) //secondary procbased ctl support
         new_vm_execution_controls_cpu=new_vm_execution_controls_cpu | (1<<31);
 
+
+
+
+
       vmwrite(vm_execution_controls_cpu, new_vm_execution_controls_cpu); //processor-based vm-execution controls
       sendstringf("Set vm_execution_controls_cpu to %8 (became %8)\n", new_vm_execution_controls_cpu, (DWORD)vmread(vm_execution_controls_cpu));
 
@@ -1137,8 +1418,10 @@ void setupVMX(pcpuinfo currentcpuinfo)
 
         if ((IA32_VMX_SECONDARY_PROCBASED_CTLS >> 32) & SPBEF_ENABLE_RDTSCP) //can it enable rdtscp ?
         {
+//#ifndef TSCHOOK
           sendstringf("Enabling rdtscp\n");
           secondarycpu|=SPBEF_ENABLE_RDTSCP;
+//#endif
         }
 
 
@@ -1189,8 +1472,8 @@ void setupVMX(pcpuinfo currentcpuinfo)
       if (hasUnrestrictedSupport)
       {
         //if my assumption is correct only the bits masking the guest/host mask will be read from this
-        vmwrite(vm_cr0_read_shadow,originalstate->cr0 & vm_cr0_guest_host_mask); //cr0 read shadow
-        vmwrite(vm_cr4_read_shadow,originalstate->cr4 & vm_cr4_guest_host_mask); //cr4 read shadow
+        vmwrite(vm_cr0_read_shadow,originalstate->cr0 & vmread(vm_cr0_guest_host_mask)); //cr0 read shadow
+        vmwrite(vm_cr4_read_shadow,originalstate->cr4 & vmread(vm_cr4_guest_host_mask)); //cr4 read shadow
       }
       else
       {
@@ -1340,7 +1623,7 @@ void setupVMX(pcpuinfo currentcpuinfo)
     }
     else
     {
-      setup8086WaitForSIPI(currentcpuinfo);
+      setup8086WaitForSIPI(currentcpuinfo, 1);
     }
 
 
@@ -1556,6 +1839,7 @@ void setupVMX(pcpuinfo currentcpuinfo)
         {
           sendstringf("No low region:\n");
           sendARD();
+          ddDrawRectangle(0,DDVerticalResolution-100,100,100,0xff0000);
           while (1);
         }
 
@@ -1628,8 +1912,8 @@ void setupVMX(pcpuinfo currentcpuinfo)
     }
     else
     {
-      //8086 entry
-      setup8086WaitForSIPI(currentcpuinfo);
+      //8086 entry (todo: make obsolete)
+      setup8086WaitForSIPI(currentcpuinfo, 1);
     }
   }
 

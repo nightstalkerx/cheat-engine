@@ -7,17 +7,19 @@ This class is used as a wrapper for different kinds of custom types
 
 interface
 
-{$ifdef windows}
-uses
-  dialogs, Classes, SysUtils,cefuncproc, autoassembler, lua, lauxlib, lualib,
-  math, commonTypeDefs;
-{$endif}
 
-{$ifdef unix} //not yet implemented, but the interface is available
+
+
+
+{$ifdef jni} //not yet implemented, but the interface is available
 uses
   Classes, SysUtils, math;
 
 type PLua_state=pointer;
+{$else}
+uses
+  dialogs, Classes, SysUtils,cefuncproc, lua, lauxlib, lualib,
+  math, commonTypeDefs;
 {$endif}
 
 type TConversionRoutine=function(data: pointer):integer; stdcall;
@@ -45,8 +47,9 @@ type
     reverseroutine: pointer;
 
 
-    {$ifndef unix}
+    {$ifndef jni}
     c: TCEAllocArray;
+    ce: TCEExceptionListArray;
     {$endif}
     currentscript: tstringlist;
     fCustomTypeType: TCustomTypeType; //plugins set this to cttPlugin
@@ -109,8 +112,8 @@ var customTypes: TList; //list holding all the custom types
 
 implementation
 
-{$ifdef windows}
-uses mainunit, LuaHandler, LuaClass;
+{$ifndef jni}
+uses mainunit, LuaHandler, LuaClass,autoassembler;
 {$endif}
 
 resourcestring
@@ -189,7 +192,7 @@ var
   r: integer;
   c,b: integer;
 begin
-{$ifndef unix}
+{$ifndef jni}
   l:=LuaVM;
 
   if lua_valuetobytesfunctionid=-1 then
@@ -251,7 +254,7 @@ var
   L: PLua_State;
   i: integer;
 begin
-  {$IFNDEF UNIX}
+  {$IFNDEF jni}
   l:=LuaVM;
 
 
@@ -329,7 +332,7 @@ var
   r: integer;
   c,b: integer;
 begin
-  {$IFNDEF UNIX}
+  {$IFNDEF jni}
   l:=LuaVM;
 
     if lua_valuetobytesfunctionid=-1 then
@@ -341,7 +344,7 @@ begin
 
     lua_pushnumber(L, f);
     lua_pushinteger(L, address);
-    if lua_pcall(l,1,bytesize,0)=0 then
+    if lua_pcall(l,2,bytesize,0)=0 then
     begin
       r:=lua_gettop(L);
       if r>0 then
@@ -392,7 +395,7 @@ var
   L: PLua_State;
   i: integer;
 begin
-  {$IFNDEF UNIX}
+  {$IFNDEF jni}
   l:=LuaVM;
 
 
@@ -471,7 +474,7 @@ end;
 
 procedure TCustomType.unloadscript;
 begin
-  {$IFNDEF UNIX}
+  {$IFNDEF jni}
   if fCustomTypeType=cttAutoAssembler then
   begin
     routine:=nil;
@@ -479,7 +482,7 @@ begin
 
     if currentscript<>nil then
     begin
-      autoassemble(currentscript,false, false, false, true, c); //popupmessages is false so it won't complain if there is no disable section
+      autoassemble(currentscript,false, false, false, true, c, ce); //popupmessages is false so it won't complain if there is no disable section
       freeandnil(currentscript);
     end;
   end;
@@ -509,12 +512,12 @@ var i: integer;
   newreverseroutine, oldreverseroutine: pointer;
   newbytesize, oldbytesize: integer;
 
-{$IFNDEF UNIX}
+{$IFNDEF jni}
   oldallocarray: TCEAllocArray;
 {$ENDIF}
 begin
 
-  {$IFNDEF UNIX}
+  {$IFNDEF jni}
   oldname:=fname;
   oldfunctiontypename:=ffunctiontypename;
   oldroutine:=routine;
@@ -538,7 +541,7 @@ begin
       try
         s.text:=script;
 
-        if autoassemble(s,false, true, false, true, c) then
+        if autoassemble(s,false, true, false, true, c, ce) then
         begin
           newpreferedalignment:=-1;
           newScriptUsesFloat:=false;
@@ -734,7 +737,7 @@ procedure TCustomType.showDebugInfo;
 var x,y: pointer;
 begin
 
-  {$IFNDEF UNIX}
+  {$IFNDEF jni}
   x:=@routine;
   y:=@reverseroutine;
   ShowMessage(format('routine=%p reverseroutine=%p',[x, y]));
@@ -761,7 +764,7 @@ var
 
   ct: TCustomType;
 begin
-  {$IFNDEF UNIX}
+  {$IFNDEF jni}
   result:=0;
   parameters:=lua_gettop(L);
   if parameters>=4 then
@@ -846,7 +849,7 @@ end;
 function registerCustomTypeAutoAssembler(L: PLua_State): integer; cdecl;
 var
   parameters: integer;
-  typename: string;
+  typename: string='';
   bytecount: integer;
   script: string;
   ct: TCustomType;
@@ -854,7 +857,7 @@ var
   s: TStringList;
   i: integer;
 begin
-  {$IFNDEF UNIX}
+  {$IFNDEF jni}
   result:=0;
   bytecount:=1;
   parameters:=lua_gettop(L);

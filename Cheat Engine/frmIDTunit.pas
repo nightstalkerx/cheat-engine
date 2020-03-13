@@ -66,6 +66,7 @@ var limit: word;
 
     title: string;
 begin
+  {$ifdef windows}
   getidts(@address,1);
   limit:=256;
 
@@ -106,8 +107,9 @@ begin
       tvidt.Items.Add(nil,title);
     end;
   finally
-    freemem(x);
+    freememandnil(x);
   end;
+  {$endif}
 end;
 
 initialization

@@ -21,6 +21,11 @@
 
 #include "vmeventhandler_amd.h"
 #include "vmxsetup.h"
+#include "epthandler.h"
+#include "exports.h"
+#include "luahandler.h"
+
+#include "displaydebug.h"
 
 #ifndef DEBUG
 #define sendstringf(s,x...)
@@ -28,6 +33,11 @@
 #endif
 
 //cpu specific stuff, put inside structure and give each cpu one
+
+
+DBVM_PLUGIN_EXIT_PRE *dbvm_plugin_exit_pre;
+DBVM_PLUGIN_EXIT_POST *dbvm_plugin_exit_post;
+
 
 int ISPAGING(pcpuinfo currentcpuinfo)
 {
@@ -110,20 +120,24 @@ char * getVMExitReassonString(void)
   {
 	  case 0: return "Exception or NMI";
 	  case 1: return "External interrupt";
-	  case 2: return "Tripple fault";
+	  case 2: return "Triple fault";
 	  case 3: return "INIT Signal";
 	  case 4: return "Start-up IPI (SIPI)";
 	  case 5: return "SMI interrupt";
 	  case 6: return "Other SMI";
 	  case 7: return "Interrupt window";
+	  case 8: return "NMI window";
 	  case 9: return "Task switch";
 	  case 10: return "CPUID";
 	  case 14: return "INVLPG";
+	  case 16: return "RDTSC";
 	  case 17: return "VMREAD";
 	  case 18: return "VMCALL";
 	  case 19: return "VMCLEAR";
+	  case 20: return "VMLAUNCH";
 	  case 21: return "VMPTRLD";
 	  case 23: return "VMREAD";
+    case 24: return "VMRESUME";
 	  case 25: return "VMWRITE";
 	  case 27: return "VMXON"; //or: omg it's one bee
 	  case 28: return "Controlregister access";
@@ -132,10 +146,13 @@ char * getVMExitReassonString(void)
 	  case 31: return "RDMSR";
 	  case 32: return "WRMSR";
 	  case 33: return "Invalid guest state";
-
+	  case 37: return "Monitor trap flag";
 	  case vm_exit_ept_violation: return "EPT Violation";
 	  case vm_exit_ept_misconfiguration: return "EPT Misconfiguration";
+	  case 50: return "INVEPT";
+	  case 51: return "RDTSCP";
 	  case 52: return "Preemption timer";
+	  case 53: return "INVVPID";
 	  case 55: return "XSETBV";
 	  default :return "NYI";
   }
@@ -646,7 +663,7 @@ criticalSection vmexitlock;
 
 
 
-int vmexit_amd(pcpuinfo currentcpuinfo, UINT64 *registers)
+int vmexit_amd(pcpuinfo currentcpuinfo, UINT64 *registers, void *fxsave UNUSED)
 {
  // displayline("vmexit_amd called. currentcpuinfo=%p\n", currentcpuinfo);
  // displayline("cpunr=%d\n", currentcpuinfo->cpunr);
@@ -662,24 +679,37 @@ int vmexit_amd(pcpuinfo currentcpuinfo, UINT64 *registers)
   sendstringf("vmexit_amd for cpu %d\n", currentcpuinfo->cpunr);
 
 #endif
+
+  if (dbvm_plugin_exit_pre)
+  {
+    BOOL r=dbvm_plugin_exit_pre(exportlist, currentcpuinfo, registers, fxsave);
+    if (r)
+      return 0;
+  }
+
   result=handleVMEvent_amd(currentcpuinfo, (VMRegisters*)registers);
+
+  if (dbvm_plugin_exit_post)
+    dbvm_plugin_exit_post(exportlist, currentcpuinfo, registers, fxsave, &result);
 
 #ifdef DEBUG
   csLeave(&vmexitlock);
 #endif
 
 
-
   return result;
 }
+
+int lastexits[10];
+int lastexitsindex=0;
 
 #ifdef DEBUG
 
 QWORD lastbeat=0;
 
-int vmexit2(pcpuinfo currentcpuinfo, UINT64 *registers);
+int vmexit2(pcpuinfo currentcpuinfo, UINT64 *registers, void *fxsave);
 
-int vmexit(pcpuinfo currentcpuinfo, UINT64 *registers)
+int vmexit(pcpuinfo currentcpuinfo, UINT64 *registers, void *fxsave)
 {
   int result;
 
@@ -700,7 +730,7 @@ int vmexit(pcpuinfo currentcpuinfo, UINT64 *registers)
   StoreVirtualMachineState(currentcpuinfo, (VMRegisters*)registers); //store the event and all other information
 
 
-  result=vmexit2(currentcpuinfo, registers);
+  result=vmexit2(currentcpuinfo, registers, fxsave);
 
 
   vmstates[used_vmstates_pos].exit_cs=vmread(vm_guest_cs);
@@ -728,11 +758,64 @@ int vmexit(pcpuinfo currentcpuinfo, UINT64 *registers)
   return result;
 }
 
-int vmexit2(pcpuinfo currentcpuinfo, UINT64 *registers)
+int vmexit2(pcpuinfo currentcpuinfo, UINT64 *registers, void *fxsave)
 #else
-int vmexit(pcpuinfo currentcpuinfo, UINT64 *registers)
+
+
+int showlife=0;
+
+int vmexit(pcpuinfo currentcpuinfo, UINT64 *registers, void *fxsave)
 #endif
 {
+
+  int haspending=0;
+  VMExit_idt_vector_information idtvectorinfo;
+  idtvectorinfo.idtvector_info=vmread(vm_idtvector_information);
+
+
+
+
+  lastexits[lastexitsindex]=vmread(vm_exit_reason);
+  lastexitsindex++;
+  lastexitsindex=lastexitsindex % 10;
+
+ // if ((showlife % 2)==0)
+  {
+    ddDrawRectangle(0,DDVerticalResolution-10,10,10,0x0000ff);
+  }
+
+
+
+
+#ifdef CHECKAPICID
+  if (currentcpuinfo)
+  {
+    if (getAPICID()!=currentcpuinfo->apicid)
+    {
+      sendstring("FUCK\n");
+      while(1);
+    }
+
+
+  }
+  else
+  {
+    sendstring("WTFOMG\n");
+    while (1);
+  }
+#endif
+
+
+
+  if (dbvm_plugin_exit_pre)
+  {
+    BOOL r=dbvm_plugin_exit_pre(exportlist, currentcpuinfo, registers, fxsave);
+    if (r)
+    {
+      ddDrawRectangle(0,DDVerticalResolution-100,100,100,0xff0000);
+      return 0;
+    }
+  }
 
 
   if (currentcpuinfo==NULL)
@@ -740,13 +823,22 @@ int vmexit(pcpuinfo currentcpuinfo, UINT64 *registers)
     nosendchar[getAPICID()]=0;
     sendstringf("currentcpuinfo==NULL");
 
+    ddDrawRectangle(0,DDVerticalResolution-100,100,100,0xff0000);
+
     while (1);
   }
 
   if (currentcpuinfo->vmxdata.runningvmx)
   {
     nosendchar[getAPICID()]=1;
-    return handleVMEvent(currentcpuinfo, (VMRegisters*)registers);
+    int r=handleVMEvent(currentcpuinfo, (VMRegisters*)registers, fxsave);
+
+    if (dbvm_plugin_exit_post)
+      dbvm_plugin_exit_post(exportlist, currentcpuinfo, registers, fxsave, &r);
+
+    ddDrawRectangle(0,DDVerticalResolution-100,100,100,0xff0000);
+
+    return r;
   }
 
   if (hasUnrestrictedSupport) //do this till I have added support for all efer read spots
@@ -762,7 +854,7 @@ int vmexit(pcpuinfo currentcpuinfo, UINT64 *registers)
 
 
  // nosendchar[getAPICID()]=1;
-  //return handleVMEvent(currentcpuinfo, (VMRegisters*)registers);
+  //return handleVMEvent(currentcpuinfo, (VMRegisters*)registers, fxsave);
 
 
   int skip=0;
@@ -771,13 +863,13 @@ int vmexit(pcpuinfo currentcpuinfo, UINT64 *registers)
   //check if it's a (dos)timer event
   if ((vmread(vm_exit_reason)==0) && (vmread(vm_exit_interruptioninfo)==0x80000b0d) && (vmread(vm_idtvector_information)==0x80000008))
   {
-    return handleVMEvent(currentcpuinfo, (VMRegisters*)registers);
+    return handleVMEvent(currentcpuinfo, (VMRegisters*)registers, fxsave);
   }
 
   //check if it's a pre-emptiontimer event
   if (vmread(vm_exit_reason)==vm_exit_vmx_preemptiontimer_reachedzero)
   {
-    return handleVMEvent(currentcpuinfo, (VMRegisters*)registers);
+    return handleVMEvent(currentcpuinfo, (VMRegisters*)registers, fxsave);
   }
 */
 
@@ -791,24 +883,68 @@ int vmexit(pcpuinfo currentcpuinfo, UINT64 *registers)
 //  currentdisplayrow=0;
 //  displayline("%d: %d:%x (%x,%x)                              \n",currentcpuinfo->cpunr,vmeventcount,vmread(vm_exit_reason),vmread(vm_guest_cs),vmread(vm_guest_rip));
 
-  nosendchar[getAPICID()]=1;
-  result=handleVMEvent(currentcpuinfo, (VMRegisters*)registers);
+  //nosendchar[getAPICID()]=1;
+  result=handleVMEvent(currentcpuinfo, (VMRegisters*)registers, fxsave);
 
-  if (currentcpuinfo->NMIOccured)
+  if (dbvm_plugin_exit_post)
+    dbvm_plugin_exit_post(exportlist, currentcpuinfo, registers, fxsave, &result);
+
+
+  /*
+  if (idtvectorinfo.valid)
   {
-    //while (wait) ;
+    VMEntry_interruption_information entryintinfo;
+
+    entryintinfo.interruption_information=vmread(vm_entry_interruptioninfo);
+    if (entryintinfo.valid==0)
+    {
+      while (1);
+    }
+  }*/
+
+
+
+
+
+  if (currentcpuinfo->NMIOccured==2) //nmi occured but no NMI window support
+  {
+    ddDrawRectangle(0,DDVerticalResolution-100,100,100,0x0000ff);
 
     currentcpuinfo->NMIOccured=0;
     return raiseNMI();
   }
 
+  //currentcpuinfo->lastTSCTouch=_rdtsc();
+
+
+  //if ((showlife % 2)==0)
+  {
+    ddDrawRectangle(0,DDVerticalResolution-10,10,10,0x00ff00);
+  }
+
+  showlife++;
+
+
   if ((result!=0) && ((result >> 8) != 0xce)  )//on release, if an unexpected event happens, just fail the instruction and hope the OS won't make a too big mess out of it
   {
-    while (wait) ;
-    return raiseInvalidOpcodeException(currentcpuinfo);
+    ddDrawRectangle(0,DDVerticalResolution-100,100,100,0xff0000);
+    while (wait) ; //remove for release
+
+    if ((vmread(vm_exit_reason) & 0x7fffffff)==vm_exit_invalid_guest_state) //invalid state
+      return raiseGeneralProtectionFault(0); //perhaps this can fix it, else fuck
+    else
+      return raiseInvalidOpcodeException(currentcpuinfo);
   }
   else
+  {
+    if (result)
+    {
+      ddDrawRectangle(0,DDVerticalResolution-100,100,100,0xff0000);
+
+    }
     return result;
+  }
+
 
 #else
   //nosendchar[getAPICID()]=0;
@@ -951,11 +1087,6 @@ int vmexit(pcpuinfo currentcpuinfo, UINT64 *registers)
  // showall=1;
 
 
-  //if (currentcpuinfo->cpunr)
-  //  showall=1;
-
-
-
 
 
 
@@ -965,7 +1096,7 @@ int vmexit(pcpuinfo currentcpuinfo, UINT64 *registers)
     verbosity=10;
   }
   else
-  if ((vmread(0x4402)==0) && ((vmread(vm_exit_interruptioninfo) & 0x8000000f)==0x80000001) )
+  if ((vmread(vm_exit_reason)==0) && ((vmread(vm_exit_interruptioninfo) & 0x8000000f)==0x80000001) )
   {
 	  //int1 bp
 	  //sendstringf("Int 1 bp");
@@ -978,8 +1109,18 @@ int vmexit(pcpuinfo currentcpuinfo, UINT64 *registers)
     switch (vmread(vm_exit_reason))
     {
 
+     // case vm_exit_init:
+     //   verbosity=10;
+     //   skip=0;
+     //   break;
+//
+      case vm_exit_vmlaunch:
+        verbosity=10;
+        skip=0;
+        break;
+
       case vm_exit_vmresume:
-        //skip=1;
+        skip=currentcpuinfo->cpunr!=0;
         break;
 
       case vm_exit_vmcall:
@@ -989,7 +1130,11 @@ int vmexit(pcpuinfo currentcpuinfo, UINT64 *registers)
     	break;
 
       case vm_exit_vmread:
-        //skip=1;
+        skip=1;
+        break;
+
+      case vm_exit_vmwrite:
+        skip=1;
         break;
 
       case vm_exit_vmptrld:
@@ -997,9 +1142,14 @@ int vmexit(pcpuinfo currentcpuinfo, UINT64 *registers)
 
         break;
 
-      case vm_exit_vmwrite:
-        //skip=1;
+      case vm_exit_invept:
+        skip=1;
         break;
+
+      case vm_exit_invvpid:
+        skip=1;
+        break;
+
 
       case vm_exit_cpuid:
         skip=2; //REALLY verbose
@@ -1022,7 +1172,13 @@ int vmexit(pcpuinfo currentcpuinfo, UINT64 *registers)
         //int cs=vmread(vm_guest_cs);
         //unsigned long long rip=vmread(vm_guest_rip);
 
-        skip=3;
+        skip=1; //3=ultra verbose
+        break;
+      }
+
+      case vm_exit_monitor_trap_flag:
+      {
+        //skip=1;
         break;
       }
 
@@ -1087,6 +1243,8 @@ int vmexit(pcpuinfo currentcpuinfo, UINT64 *registers)
       {
         //int cs=vmread(vm_guest_cs);
         //unsigned long long rip=vmread(vm_guest_rip);
+        skip=1;
+        verbosity=10;
 
         break;
       }
@@ -1096,6 +1254,7 @@ int vmexit(pcpuinfo currentcpuinfo, UINT64 *registers)
     	  VMRegisters* r=(VMRegisters*)registers;
         switch (r->rcx)
         {
+          case 0x10:
           case 0x176:
           case 0x175:
           case 0x174:
@@ -1114,6 +1273,7 @@ int vmexit(pcpuinfo currentcpuinfo, UINT64 *registers)
       	VMRegisters* r=(VMRegisters*)registers;
         switch (r->rcx)
         {
+          case 0x10:
           case 0x3a:
           case 0xc0000080:
             skip=1;
@@ -1125,6 +1285,10 @@ int vmexit(pcpuinfo currentcpuinfo, UINT64 *registers)
       }
 
       case vm_exit_xsetbv:
+        skip=1;
+        break;
+
+      case vm_exit_rdtsc:
         skip=1;
         break;
 
@@ -1143,22 +1307,26 @@ int vmexit(pcpuinfo currentcpuinfo, UINT64 *registers)
 
     }
 
+   // if (currentcpuinfo->cpunr) //debug code to test AP cpu's (only use if cpu0 boots properly)
+   //   skip-=5;
 
-   //if (currentcpuinfo->cpunr==0) //debug code to test AP cpu's (only use if cpu0 boots properly)
-     // skip=1;
-   //else
-     // skip=0;
 
     skip-=verbosity;
+
+
+
 
     if (skip>0)
     {
       nosendchar[getAPICID()]=1;
 
-      result=handleVMEvent(currentcpuinfo, (VMRegisters*)registers);
+      result=handleVMEvent(currentcpuinfo, (VMRegisters*)registers, fxsave);
 
-      if (currentcpuinfo->NMIOccured)
+      if (currentcpuinfo->NMIOccured==2) //nmi occured but no NMI window support
+      {
+        currentcpuinfo->NMIOccured=0;
         return raiseNMI();
+      }
 
       if (currentcpuinfo->cpunr)
       {
@@ -1231,20 +1399,10 @@ int vmexit(pcpuinfo currentcpuinfo, UINT64 *registers)
   sendstringf("rip=%6\n",vmread(vm_guest_rip));
 
   {
-    int notpaged=0;
     UINT64 ripaddress UNUSED=vmread(vm_guest_cs_base)+vmread(vm_guest_rip);
     sendstringf("ripaddress=%x\n", ripaddress);
 
     sendstringf("Rip=%6", vmread(vm_guest_cs_base)+vmread(vm_guest_rip));
-
-    if (notpaged)
-    {
-       sendstring("(physical = invalid)\n\r");
-    }
-    else
-    {
-      sendstringf("(physical=%6)\n\r", ripaddress);
-    }
 
   }
 
@@ -1289,6 +1447,7 @@ int vmexit(pcpuinfo currentcpuinfo, UINT64 *registers)
     sendstringf("|   7: toggle debugmode (%d)             |\n\r",debugmode);
     sendstring("|   8: set breakpoint                   |\n\r");
     sendstring("|   9: display physical memory          |\n\r");
+    sendstring("|   l: Lua Engine                       |\n\r");
     sendstring("|   0: quit virtual machine             |\n\r");
   //sendstring("|   p: previous event                   |\n\r");
     sendstring("\\---------------------------------------/\n\r");
@@ -1299,20 +1458,29 @@ int vmexit(pcpuinfo currentcpuinfo, UINT64 *registers)
     switch (command)
     {
       case  '1' :
-        result=handleVMEvent(currentcpuinfo, (VMRegisters*)registers);
-        if (currentcpuinfo->NMIOccured)
+        result=handleVMEvent(currentcpuinfo, (VMRegisters*)registers, fxsave);
+
+        if (dbvm_plugin_exit_post)
+          dbvm_plugin_exit_post(exportlist, currentcpuinfo, registers, fxsave, &result);
+
+
+
+        if (currentcpuinfo->NMIOccured==2) //nmi occured but no NMI window support
+        {
+          currentcpuinfo->NMIOccured=0;
           return raiseNMI();
+        }
 
         if (currentcpuinfo->cpunr)
         {
-          sendstring("cpunr!=0");
+          //sendstring("cpunr!=0");
         }
 
         //setResumeFlag();
-        sendstringf("Returned from handleVMEvent. result=%d (CR0=%x)\n\r",result,vmread(vm_guest_cr0));
+        //sendstringf("Returned from handleVMEvent. result=%d (CR0=%x)\n\r",result,vmread(vm_guest_cr0));
 
-        if (currentcpuinfo->cpunr==1)
-          sendvmstate(currentcpuinfo, (VMRegisters*)registers);
+        //if (currentcpuinfo->cpunr==1)
+        //  sendvmstate(currentcpuinfo, (VMRegisters*)registers);
 
 
         if ((result!=0) && ((result >> 8)!=0xce))
@@ -1564,6 +1732,14 @@ int vmexit(pcpuinfo currentcpuinfo, UINT64 *registers)
         break;
       }
 
+      case 'l' :
+      {
+#if (defined SERIALPORT) && (SERIALPORT != 0)
+        enterLuaConsole();
+#endif
+        break;
+      }
+
 #ifdef DEBUG
       case  'p' :
       {
@@ -1584,21 +1760,18 @@ int vmexit(pcpuinfo currentcpuinfo, UINT64 *registers)
       case  'i' :
       {
         //test interrupt
-        currentcpuinfo->OnInterrupt.RIP=(QWORD)(volatile void *)(&&InterruptFired); //set interrupt location
-        currentcpuinfo->OnInterrupt.RSP=getRSP();
+        //vmx_enableNMIWindowExiting();
+        //vmx_enableSingleStepMode();
 
-        __asm("sti"); //enable interrupts
-        __asm("nop"); //this nop is ignored
-        __asm("nop"); //this nop captures the interrupt
-        __asm("cli"); //disable interrupts
-        //nothing happened
-        currentcpuinfo->OnInterrupt.RIP=0;
+        //setup a memory watch for physical address 0x7000
+        //int ID;
+        //int r;
+        //sendstringf("Setting write watch at 0x7000 to 0x7fff\n");
 
 
-        sendstring("No interrupt\n");
+        //r=ept_watch_activate(0x7000, 4096, 0,0,64, &ID);
 
-  InterruptFired:
-        sendstring("After interrupt (if there was one)\n");
+        //sendstringf("ept_watch_activate returned %d and ID %d\n", r,ID);
         break;
       }
 
@@ -1673,6 +1846,10 @@ void launchVMX(pcpuinfo currentcpuinfo)
     unmapPhysicalMemory(pos, sizeof(OriginalState));
   }
 
+  outportb(0x80,0x01);
+
+
+
   if (isAMD)
     return launchVMX_AMD(currentcpuinfo, originalstate);
 
@@ -1690,10 +1867,14 @@ void launchVMX(pcpuinfo currentcpuinfo)
 
   }
 
+  outportb(0x80,0x02);
+
   if (restorestate)
     result=vmxloop(currentcpuinfo, &originalstate->rax);
   else
     result=vmxloop(currentcpuinfo, NULL);
+
+  outportb(0x80,0xCF);
 
   displayline("VMXLOOP EXIT: APICID=%d\n\r",getAPICID());
   nosendchar[getAPICID()]=0;
@@ -2346,7 +2527,7 @@ void displayPhysicalMemory(void)
   sendstringf("Going to show the memory region %6 to %6 \n\r",StartAddress,StartAddress+nrofbytes);
 
   unsigned char *memory=(unsigned char *)mapPhysicalMemory(StartAddress, nrofbytes);
-  for (i=0; i<nrofbytes; i+=16);
+  for (i=0; i<nrofbytes; i+=16)
   {
     int j;
     unsigned char bt;

@@ -5,10 +5,17 @@ unit frmEnumerateDLLsUnit;
 interface
 
 uses
-  windows, LCLIntf, Messages, SysUtils, Classes, Graphics, Controls, Forms,
-  Dialogs,CEFuncProc,imagehlp, StdCtrls, ComCtrls, ExtCtrls, ActnList,
-  Menus, LResources,symbolhandler, FindDialogFix, commonTypeDefs, strutils,
-  ProcessHandlerUnit;
+  {$ifdef darwin}
+  macport,
+  {$endif}
+  {$ifdef windows}
+  windows, imagehlp,
+  {$endif}
+
+  LCLIntf, Messages, SysUtils, Classes, Graphics, Controls, Forms,
+  Dialogs,CEFuncProc, StdCtrls, ComCtrls, ExtCtrls, ActnList,
+  Menus, LResources,symbolhandler, symbolhandlerstructs, FindDialogFix,
+  commonTypeDefs, strutils, ProcessHandlerUnit, Clipbrd;
 
 type tenumthread=class(tthread)
   public
@@ -27,7 +34,10 @@ type
   { TfrmEnumerateDLLs }
 
   TfrmEnumerateDLLs = class(TForm)
+    CopySymbolName: TAction;
+    edImageList: TImageList;
     Label2: TLabel;
+    CopySymbolName1: TMenuItem;
     TreeView1: TTreeView;
     Panel1: TPanel;
     Button1: TButton;
@@ -37,6 +47,7 @@ type
     Find: TAction;
     pmSymbol: TPopupMenu;
     Find1: TMenuItem;
+    procedure CopySymbolNameExecute(Sender: TObject);
     procedure Button1Click(Sender: TObject);
     procedure FindDialog1Close(Sender: TObject);
     procedure FormClose(Sender: TObject; var Action: TCloseAction);
@@ -121,7 +132,7 @@ begin
   Priority:=tpLower;
 
  // symhandler.waitforsymbolsloaded;
-  
+
   if not canceled then
   begin
     sl:=tstringlist.create;
@@ -143,7 +154,6 @@ begin
         begin
           inc(symbolcount);
           symbolname[symbolcount]:=IntToHex(ptruint(sl.objects[j]),8)+' - '+sl[j];
-
 
           if canceled then break;
 
@@ -185,6 +195,12 @@ end;
 procedure TfrmEnumerateDLLs.Button1Click(Sender: TObject);
 begin
   close;
+end;
+
+procedure TfrmEnumerateDLLs.CopySymbolNameExecute(Sender: TObject);
+begin
+  if Treeview1.Selected<>nil then
+    Clipboard.AsText:=TreeView1.Selected.Text;
 end;
 
 procedure TfrmEnumerateDLLs.FindDialog1Close(Sender: TObject);
@@ -254,10 +270,11 @@ begin
       if i>0 then
       begin
         getmem(p,128);
+        x:=0;
         readprocessmemory(processhandle, pointer(a),p,127,x);
         p[x]:=#0;
         node.text:=node.text+p;
-        freemem(p);
+        freememandnil(p);
       end;
 
     except

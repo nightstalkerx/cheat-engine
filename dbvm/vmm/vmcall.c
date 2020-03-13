@@ -12,7 +12,12 @@
 #include "multicore.h"
 #include "apic.h"
 
+#include "vbe3.h"
 #include "psod32.h"
+#include "eptstructs.h"
+#include "epthandler.h"
+#include "displaydebug.h"
+
 
 //#pragma GCC push_options
 //#pragma GCC optimize ("O0")
@@ -34,40 +39,167 @@ void psod(void)
 
   int x=call32bit((DWORD)(QWORD)PSOD32BitHandler);
 
+  //tell other cpu's to stop
+
   sendstringf("call32bit((DWORD)PSOD32BitHandler) returned with %d\n", x);
 
+  //disable PIC interrupts
+
+ // jtagbp();
+
+
+  //VBE enables interrupts..
+  BYTE old21=inportb(0x21);
+  BYTE olda1=inportb(0xa1);
+  QWORD oldcr8=getCR8();
+  outportb(0x21,0xff);
+  outportb(0xa1,0xff);
+  setCR8(0xf);
+
+  if (initializeVBE3())
+  {
+    int i;
+    WORD *vm;
+    VBE_ControllerInfo ci;
+    zeromemory(&ci, sizeof(ci));
+    ci.VbeSignature=0x32454256;
+    if (VBE_GetControllerInfo(&ci))
+    {
+      sendstringf("VBE_GetControllerInfo returned success\n");
+      sendstringf("  ci.Capabilities=%8\n", ci.Capabilities);
+
+      unsigned char *s=VBEPtrToAddress(ci.OemStringPtr);
+      if (s)
+      {
+        sendstring("  ci.OemString=");
+        sendstring((char *)s);
+        sendstring("\n");
+      }
+
+
+      sendstringf("  VideoModePointer at %6\n", VBEPtrToAddress(ci.VideoModePtr));
+      vm=VBEPtrToAddress(ci.VideoModePtr);
+
+
+      int bestmode=0;
+      //find a mode I like
+      for (i=0; vm[i]!=0xffff; i++)
+      {
+        VBE_ModeInfo mi;
+        sendstringf("    %x : \n", vm[i]);
+
+        if (VBE_GetModeInfo(vm[i], &mi))
+        {
+          sendstringf("      %d x %d x %d (mode=%x PA=%8)\n", mi.XResolution, mi.YResolution, mi.BitsPerPixel, mi.ModeAttributes, mi.PhysBasePtr);
+
+          if ((mi.XResolution>600) && (mi.XResolution<800) && (mi.YResolution>400) && (mi.YResolution<600) )
+          {
+            if (bestmode)
+            {
+              VBE_ModeInfo other;
+              VBE_GetModeInfo(bestmode, &other);
+              if (mi.BitsPerPixel>other.BitsPerPixel) //better color
+                bestmode=vm[i];
+            }
+            else
+              bestmode=vm[i];
+          }
+        }
+        else
+          sendstringf("      No mode info\n");
+      }
+      VBE_CRTCInfo crti;
+      zeromemory(&crti, sizeof(crti));
+
+      int statesize=VBE_GetStateStoreSize(); //not working
+      void *state;
+
+      if (statesize)
+      {
+        sendstringf("statesize=%d bytes\n", statesize);
+        state=malloc(statesize);
+
+        VBE_SaveState(state, statesize);
+      }
+      else
+        sendstringf("No statesize\n");
+
+      sendstringf("Picked mode %x\n", bestmode);
+
+      if (VBE_SetMode(bestmode | (1<<14),&crti))
+      {
+        VBE_ModeInfo mi;
+        VBE_GetModeInfo(bestmode, &mi);
+
+
+        //blank the other pages
+        for (i=1; i<mi.LinNumberOfImagePages; i++)
+        {
+          VBE_SetDrawPage(i);
+          VBE_SetPenColor(0xffff00);
+          VBE_DrawBox(0,0,mi.XResolution-1, mi.YResolution-1);
+        }
+
+        VBE_SetDrawPage(0);
+
+        VBE_SetPenColor(0x00ffff);
+        VBE_DrawBox(0,0,mi.XResolution-1, mi.YResolution-1);
+
+        VBE_SetPenColor(0x0000ff);
+        VBE_DrawBox(20,40,mi.XResolution-1-20, mi.YResolution-1-40);
+
+        VBE_ResetStart();
+
+
+        /*
+        while (1)
+          _pause();
+          */
+
+      }
+
+      if (statesize)
+      {
+        VBE_RestoreState(state, statesize);
+        displayline("Does this still work?\n");
+      }
+    }
+
+  }
+
+  __asm("cli");
+  outportb(0x21,old21);
+  outportb(0xa1,olda1);
+  setCR8(oldcr8);
 }
 
-QWORD readMSRSafe(pcpuinfo currentcpuinfo, DWORD msr)
+QWORD readMSRSafe(DWORD msr)
 {
-  volatile QWORD result=0;
+  QWORD r;
+  try
+  {
+    r=readMSR(msr);
+  }
+  except
+  {
+    r=0;
+  }
+  tryend
 
-  currentcpuinfo->LastInterrupt=0;
-  currentcpuinfo->OnInterrupt.RIP=(QWORD)((volatile void *)&&InterruptFired); //set interrupt location
-  currentcpuinfo->OnInterrupt.RSP=getRSP();
-  currentcpuinfo->OnInterrupt.RBP=getRBP();
-  asm volatile ("": : :"memory");
-  result=readMSR(msr);
-  asm volatile ("": : :"memory");
-
-InterruptFired:
-  currentcpuinfo->OnInterrupt.RIP=0;
-
-  return result;
+  return r;
 }
 
-void writeMSRSafe(pcpuinfo currentcpuinfo, DWORD msr, QWORD value)
+void writeMSRSafe(DWORD msr, QWORD value)
 {
-  currentcpuinfo->LastInterrupt=0;
-  currentcpuinfo->OnInterrupt.RIP=(QWORD)((volatile void *)&&InterruptFired); //set interrupt location
-  currentcpuinfo->OnInterrupt.RSP=getRSP();
-  currentcpuinfo->OnInterrupt.RBP=getRSP();
-  asm volatile ("": : :"memory");
-  writeMSR(msr, value);
-  asm volatile ("": : :"memory");
+  try
+  {
+    writeMSR(msr, value);
+  }
+  except
+  {
 
-InterruptFired:
-  currentcpuinfo->OnInterrupt.RIP=0;
+  }
+  tryend
 }
 
 //#pragma GCC pop_options
@@ -80,6 +212,9 @@ int raisePagefault(pcpuinfo currentcpuinfo, UINT64 address)
    */
   PFerrorcode errorcode;
   errorcode.errorcode=0;
+
+  if (currentcpuinfo==NULL)
+    currentcpuinfo=getcpuinfo();
 
   //get DPL of SS (or CS?), if 3, set US to 1, if anything else, 0
   if (isAMD)
@@ -163,11 +298,10 @@ int raiseInvalidOpcodeException(pcpuinfo currentcpuinfo)
     newintinfo.haserrorcode=0; //no errorcode
     newintinfo.valid=1;
 
-    vmwrite(0x4016, (ULONG)newintinfo.interruption_information); //entry info field
+    vmwrite(vm_entry_interruptioninfo, (ULONG)newintinfo.interruption_information); //entry info field
     vmwrite(0x4018, 0); //entry errorcode
     vmwrite(0x401a, vmread(0x440c)); //entry instruction length (not sure about this)
   }
-
 
   return 0;
 }
@@ -223,6 +357,175 @@ int raisePrivilege(pcpuinfo currentcpuinfo)
   //the user will have to return to normal usermode himself and then call Restore interrupts
   return 0;
 
+}
+
+int VMCALL_SwitchToKernelMode(pcpuinfo cpuinfo, WORD newCS) {
+	pvmcb vmcb = cpuinfo->vmcb;
+
+	//Referenced to syscall (only valid in 64bit)
+	if(!IS64BITCODE(cpuinfo))
+		return raiseInvalidOpcodeException(cpuinfo);
+
+	WORD oldCS, oldSS;
+	cpuinfo->SwitchKernel.CS = oldCS = isAMD ? vmcb->cs_selector : vmread(vm_guest_cs);
+	cpuinfo->SwitchKernel.SS = oldSS = isAMD ? vmcb->ss_selector : vmread(vm_guest_ss);
+	//Do you want to switch from ring0 to ring0?
+	if((oldCS & 3) == 0)
+		return raiseInvalidOpcodeException(cpuinfo);
+
+	//Save CR4 and clear SMEP, SMAP bit
+	//windows 10 enables SMEP and will enable SMAP too
+	if(isAMD) {
+		cpuinfo->SwitchKernel.CR4 = vmcb->CR4;
+		vmcb->CR4 = vmcb->CR4 & ~CR4_SMEP & ~CR4_SMAP;
+	}
+	else {
+		cpuinfo->SwitchKernel.CR4 = vmread(vm_guest_cr4);
+		vmwrite(vm_guest_cr4, vmread(vm_guest_cr4) & ~CR4_SMEP & ~CR4_SMAP);
+	}
+
+	//Save RFLAGS and set RFLAGS properly
+	RFLAGS rflags;
+	rflags.value = isAMD ? vmcb->RFLAGS : vmread(vm_guest_rflags);
+	cpuinfo->SwitchKernel.RFLAGS = rflags.value;
+
+	rflags.IF = 0;		//Interrupt disable
+	rflags.IOPL = 0;	//change IOPL to ring 0
+	if(isAMD) {
+		vmcb->RFLAGS = rflags.value;
+	}
+	else {
+		vmwrite(vm_guest_rflags, rflags.value);
+	}
+
+	Access_Rights ar;
+
+	//CS.Selector ¡ç IA32_STAR[47:32] AND FFFCH (* Operating system provides CS; RPL forced to 0 *)
+	//WORD newCS = (readMSR(IA32_STAR) >> 32) & 0xFFFC;
+
+	ar.AccessRights = 0;
+	ar.Segment_type = 11;		//CS.Type ¡ç 11; (* Execute/read code, accessed *)
+	ar.S = 1;								//CS.S ¡ç 1;
+	ar.DPL = 0;							//CS.DPL ¡ç 0;
+	ar.P = 1;								//CS.P ¡ç 1;
+	ar.L = 1;								//CS.L ¡ç 1; (* Entry is to 64-bit mode *)
+	ar.D_B = 0;							//CS.D ¡ç 0; (* Required if CS.L = 1 *)
+	ar.G = 1;								//CS.G ¡ç 1; (* 4-KByte granularity *)
+
+	//CS.Base ¡ç 0; (* Flat segment *)
+	//CS.Limit ¡ç FFFFFH; (* With 4-KByte granularity, implies a 4-GByte limit *)
+	if(isAMD) {
+		vmcb->cs_selector = newCS;
+		vmcb->cs_base = 0;
+		vmcb->cs_limit = 0xFFFFF;
+		vmcb->cs_attrib = convertSegmentAccessRightsToSegmentAttrib(ar.AccessRights);
+	}
+	else {
+		vmwrite(vm_guest_cs, newCS);
+		vmwrite(vm_guest_cs_base, 0);
+		vmwrite(vm_guest_cs_limit, 0xFFFFF);
+		vmwrite(vm_guest_cs_access_rights, ar.AccessRights);
+	}
+
+	//SS.Selector ¡ç CS.Selector + 8
+	WORD nesSS = newCS + 8;
+
+	ar.AccessRights = 0;
+	ar.Segment_type = 3;	//SS.Type ¡ç 3; (* Read/write data, accessed *)
+	ar.S = 1;							//SS.S ¡ç 1;
+	ar.DPL = 0;						//SS.DPL ¡ç 0;
+	ar.P = 1;							//SS.P ¡ç 1;
+	ar.D_B = 1;						//SS.B ¡ç 1; (* 32-bit stack segment *)
+	ar.G = 1;							//SS.G ¡ç 1; (* 4-KByte granularity *)
+
+	if(isAMD) {
+		vmcb->ss_selector = nesSS;
+		vmcb->ss_base = 0;
+		vmcb->ss_limit = 0xFFFFF;
+		vmcb->ss_attrib = convertSegmentAccessRightsToSegmentAttrib(ar.AccessRights);
+	}
+	else {
+		vmwrite(vm_guest_ss, newCS + 8);
+		vmwrite(vm_guest_ss_base, 0);					//SS.Base ¡ç 0; (* Flat segment *)
+		vmwrite(vm_guest_ss_limit, 0xFFFFF);	//SS.Limit ¡ç FFFFFH; (* With 4-KByte granularity, implies a 4-GByte limit *)
+		vmwrite(vm_guest_ss_access_rights, ar.AccessRights);
+	}
+
+	return 0;
+}
+
+int VMCALL_ReturnToUserMode(pcpuinfo cpuinfo) {
+	pvmcb vmcb = cpuinfo->vmcb;
+
+	//Referenced to syscall (only valid in 64bit)
+	if(!IS64BITCODE(cpuinfo))
+		return raiseInvalidOpcodeException(cpuinfo);
+
+	WORD oldCS = isAMD ? vmcb->cs_selector : vmread(vm_guest_cs);
+	//Do you want to switch from ring3 to ring3?
+	if((oldCS & 3) > 0)
+		return raiseInvalidOpcodeException(cpuinfo);
+
+	//Restore CR4, RFLAGS
+	if(isAMD) {
+		vmcb->CR4 = cpuinfo->SwitchKernel.CR4;
+		vmcb->RFLAGS = cpuinfo->SwitchKernel.RFLAGS;
+	}
+	else {
+		vmwrite(vm_guest_cr4, cpuinfo->SwitchKernel.CR4);
+		vmwrite(vm_guest_rflags, cpuinfo->SwitchKernel.RFLAGS);
+	}
+
+	Access_Rights ar;
+
+	//Restore CS
+	ar.AccessRights = 0;
+	ar.Segment_type = 11;		//CS.Type ¡ç 11; (* Execute/read code, accessed *)
+	ar.S = 1;								//CS.S ¡ç 1;
+	ar.DPL = 3;							//CS.DPL ¡ç 3;
+	ar.P = 1;								//CS.P ¡ç 1;
+	ar.L = 1;								//CS.L ¡ç 1; (* Entry is to 64-bit mode *)
+	ar.D_B = 0;							//CS.D ¡ç 0; (* Required if CS.L = 1 *)
+	ar.G = 1;								//CS.G ¡ç 1; (* 4-KByte granularity *)
+
+	//CS.Base ¡ç 0; (* Flat segment *)
+	//CS.Limit ¡ç FFFFFH; (* With 4-KByte granularity, implies a 4-GByte limit *)
+	if(isAMD) {
+		vmcb->cs_selector = cpuinfo->SwitchKernel.CS;
+		vmcb->cs_base = 0;
+		vmcb->cs_limit = 0xFFFFF;
+		vmcb->cs_attrib = convertSegmentAccessRightsToSegmentAttrib(ar.AccessRights);
+	}
+	else {
+		vmwrite(vm_guest_cs, cpuinfo->SwitchKernel.CS);
+		vmwrite(vm_guest_cs_base, 0);
+		vmwrite(vm_guest_cs_limit, 0xFFFFF);
+		vmwrite(vm_guest_cs_access_rights, ar.AccessRights);
+	}
+
+	//Restore SS
+	ar.AccessRights = 0;
+	ar.Segment_type = 3;	//SS.Type ¡ç 3; (* Read/write data, accessed *)
+	ar.S = 1;							//SS.S ¡ç 1;
+	ar.DPL = 3;						//SS.DPL ¡ç 3;
+	ar.P = 1;							//SS.P ¡ç 1;
+	ar.D_B = 1;						//SS.B ¡ç 1; (* 32-bit stack segment *)
+	ar.G = 1;							//SS.G ¡ç 1; (* 4-KByte granularity *)
+
+	if(isAMD) {
+		vmcb->ss_selector = cpuinfo->SwitchKernel.SS;
+		vmcb->ss_base = 0;
+		vmcb->ss_limit = 0xFFFFF;
+		vmcb->ss_attrib = convertSegmentAccessRightsToSegmentAttrib(ar.AccessRights);
+	}
+	else {
+		vmwrite(vm_guest_ss, cpuinfo->SwitchKernel.SS);
+		vmwrite(vm_guest_ss_base, 0);					//SS.Base ¡ç 0; (* Flat segment *)
+		vmwrite(vm_guest_ss_limit, 0xFFFFF);	//SS.Limit ¡ç FFFFFH; (* With 4-KByte granularity, implies a 4-GByte limit *)
+		vmwrite(vm_guest_ss_access_rights, ar.AccessRights);
+	}
+
+	return 0;
 }
 
 int change_selectors(pcpuinfo currentcpuinfo, ULONG cs, ULONG ss, ULONG ds, ULONG es, ULONG fs, ULONG gs)
@@ -368,7 +671,7 @@ void returnFromCR3Callback(pcpuinfo currentcpuinfo, VMRegisters *vmregisters, un
 
 
   //interrupt state
-  vmwrite(0x4824,currentcpuinfo->cr3_callback.interruptability_state);
+  vmwrite(vm_guest_interruptability_state,currentcpuinfo->cr3_callback.interruptability_state);
 
   //new cr3
   //set the real CR3 to what is stored in the parameter, guestcr3 has already been set
@@ -393,10 +696,6 @@ void returnFromCR3Callback(pcpuinfo currentcpuinfo, VMRegisters *vmregisters, un
 //  sendstringf("New cr3=%x\n\r",newcr3);
 //  sendstringf("currentcpuinfo->guestCR3=%x\n\r",currentcpuinfo->guestCR3);
   currentcpuinfo->cr3_callback.called_callback = 0;
-
-
-//  sendstringf("after:\n\r");
-//  sendvmstate(currentcpuinfo,vmregisters);
 }
 
 int vmcall_writePhysicalMemory(pcpuinfo currentcpuinfo, VMRegisters *vmregisters, PVMCALL_WRITEPHYSICALMEMORY wpmcommand)
@@ -480,8 +779,8 @@ int vmcall_readPhysicalMemory(pcpuinfo currentcpuinfo, VMRegisters *vmregisters,
   unsigned char *Destination;
   unsigned char *Source;
 
-  sendstringf("Reading %d bytes from physical address %6 and writing it to %6\n\r",rpmcommand->bytesToRead, rpmcommand->sourcePA, rpmcommand->destinationVA);
-  sendstringf("noPageFault=%d\n\r",rpmcommand->nopagefault);
+  //sendstringf("Reading %d bytes from physical address %6 and writing it to %6\n\r",rpmcommand->bytesToRead, rpmcommand->sourcePA, rpmcommand->destinationVA);
+  //sendstringf("noPageFault=%d\n\r",rpmcommand->nopagefault);
 
   int currentblocksize=rpmcommand->bytesToRead;
   if (currentblocksize>1048576)
@@ -490,9 +789,9 @@ int vmcall_readPhysicalMemory(pcpuinfo currentcpuinfo, VMRegisters *vmregisters,
 
   Destination=(unsigned char *)mapVMmemoryEx(currentcpuinfo, rpmcommand->destinationVA, currentblocksize, &error, &pagefaultaddress,1);
 
-  sendstringf("Destination=%6\n\r",Destination);
-  sendstringf("error=%d\n\r",error);
-  sendstringf("pagefaultaddress=%6\n\r",pagefaultaddress);
+  //sendstringf("Destination=%6\n\r",Destination);
+  //sendstringf("error=%d\n\r",error);
+  //sendstringf("pagefaultaddress=%6\n\r",pagefaultaddress);
 
 
   if (error)
@@ -510,15 +809,15 @@ int vmcall_readPhysicalMemory(pcpuinfo currentcpuinfo, VMRegisters *vmregisters,
 
   if (currentblocksize) //there is some memory. Copy it
   {
-    sendstringf("PA Destination[0]=%6\n", VirtualToPhysical(&Destination[0]));
-    sendstringf("PA Destination[0x1000]=%6\n", VirtualToPhysical(&Destination[0x1000]));
+    //sendstringf("PA Destination[0]=%6\n", VirtualToPhysical(&Destination[0]));
+    //sendstringf("PA Destination[0x1000]=%6\n", VirtualToPhysical(&Destination[0x1000]));
 
 
     //map the source
     Source=(unsigned char *)mapPhysicalMemory(rpmcommand->sourcePA, currentblocksize);
-    sendstringf("Source=%6\n\r",Source);
-    sendstringf("PA Source[0]=%6\n", VirtualToPhysical(&Source[0]));
-    sendstringf("PA Source[0x1000]=%6\n", VirtualToPhysical(&Source[0x1000]));
+    //sendstringf("Source=%6\n\r",Source);
+    //sendstringf("PA Source[0]=%6\n", VirtualToPhysical(&Source[0]));
+    //sendstringf("PA Source[0x1000]=%6\n", VirtualToPhysical(&Source[0x1000]));
 
     //copy memory from physical to vm
     copymem(Destination, Source, currentblocksize);
@@ -531,7 +830,7 @@ int vmcall_readPhysicalMemory(pcpuinfo currentcpuinfo, VMRegisters *vmregisters,
     rpmcommand->sourcePA+=currentblocksize;
   }
 
-  sendstringf("Returning (error=%d. rpmcommand->bytesToRead=%d)\n\r",error, rpmcommand->bytesToRead);
+  //sendstringf("Returning (error=%d. rpmcommand->bytesToRead=%d)\n\r",error, rpmcommand->bytesToRead);
 
   if ((error==2) && (rpmcommand->nopagefault==0))
   {
@@ -543,7 +842,7 @@ int vmcall_readPhysicalMemory(pcpuinfo currentcpuinfo, VMRegisters *vmregisters,
   if ((rpmcommand->bytesToRead==0) || (error))
   {
     //handled it
-    sendstringf("Done. Going to the next instruction. rpmcommand->bytesToRead=%d\n",rpmcommand->bytesToRead);
+    //sendstringf("Done. Going to the next instruction. rpmcommand->bytesToRead=%d\n",rpmcommand->bytesToRead);
     vmregisters->rax=rpmcommand->bytesToRead;
     vmwrite(vm_guest_rip,vmread(vm_guest_rip)+vmread(vm_exit_instructionlength));
   } //else go again with the new rpmcommand data
@@ -551,12 +850,38 @@ int vmcall_readPhysicalMemory(pcpuinfo currentcpuinfo, VMRegisters *vmregisters,
 }
 
 
+
+VMSTATUS vmcall_watch_retrievelog(VMRegisters *vmregisters,  PVMCALL_WATCH_RETRIEVELOG_PARAM params)
+{
+  //int o=(QWORD)(&params->copied)-(QWORD)params;
+  //sendstringf("params->copied is at offset %d\n", o);
+  return ept_watch_retrievelog(params->ID, params->results, &params->resultsize, &params->copied, &vmregisters->rax);
+
+
+}
+
+int vmcall_watch_delete(PVMCALL_WATCH_DISABLE_PARAM params)
+{
+  int r=1;
+  int ID=params->ID;
+
+  r=ept_watch_deactivate(ID);
+  return r;
+}
+
+int vmcall_watch_activate(PVMCALL_WATCH_PARAM params, int Type)
+{
+  return ept_watch_activate(params->PhysicalAddress, params->Size, Type, params->Options, params->MaxEntryCount, &params->ID);
+}
+
 int _handleVMCallInstruction(pcpuinfo currentcpuinfo, VMRegisters *vmregisters, ULONG *vmcall_instruction)
 {
   int error;
   QWORD pagefaultaddress;
 
+  //sendstringf("_handleVMCallInstruction (%d)\n", vmcall_instruction[2]);
 
+  currentcpuinfo->LastVMCall=vmcall_instruction[2];
 
   switch (vmcall_instruction[2])
   {
@@ -771,8 +1096,8 @@ int _handleVMCallInstruction(pcpuinfo currentcpuinfo, VMRegisters *vmregisters, 
       }
 
       sendstringf("VMCALL_BLOCK_INTERRUPTS\n");
-      currentcpuinfo->Previous_Interuptability_State=vmread(0x4824);
-      vmwrite(0x4824, (1<<3)); //block by NMI, so even a nmi based taskswitch won't interrupt
+      currentcpuinfo->Previous_Interuptability_State=vmread(vm_guest_interruptability_state);
+      vmwrite(vm_guest_interruptability_state, (1<<3)); //block by NMI, so even a nmi based taskswitch won't interrupt
 
       //and set IF to 0 in eflags
       currentcpuinfo->Previous_CLI=(vmread(0x6820) >> 9) & 1;
@@ -981,9 +1306,10 @@ int _handleVMCallInstruction(pcpuinfo currentcpuinfo, VMRegisters *vmregisters, 
     case VMCALL_READMSR:
     {
       DWORD msr=vmcall_instruction[3];
+      QWORD value=readMSRSafe(msr);
 
-      *(UINT64 *)&vmcall_instruction[4]=readMSRSafe(currentcpuinfo, msr);
-      vmregisters->rax = *(UINT64 *)&vmcall_instruction[4];
+      *(UINT64 *)&vmcall_instruction[4]=value; //obsolete
+      vmregisters->rax = value;
       break;
     }
 
@@ -992,7 +1318,7 @@ int _handleVMCallInstruction(pcpuinfo currentcpuinfo, VMRegisters *vmregisters, 
       DWORD msr=vmcall_instruction[3];
       QWORD msrvalue=*(UINT64 *)&vmcall_instruction[4];
 
-      writeMSR(msr, msrvalue);
+      writeMSRSafe(msr, msrvalue);
       break;
     }
 
@@ -1180,20 +1506,476 @@ int _handleVMCallInstruction(pcpuinfo currentcpuinfo, VMRegisters *vmregisters, 
       break;
     }
 
-    case VMCALL_FINDWHATWRITESPAGE:
+    case VMCALL_WATCH_WRITES:
     {
-      //if (hasEPTsupport)
+      nosendchar[getAPICID()]=0;
+
+      sendstringf("VMCALL_WATCH_WRITES\n");
+      if (hasEPTsupport)
       {
-        //(re)map this address as read/execute only
+        vmregisters->rax=vmcall_watch_activate((PVMCALL_WATCH_PARAM)vmcall_instruction,EPTW_WRITE); //write
+        sendstringf("vmcall_watch_activate returned %d and ID %d\n", vmregisters->rax, ((PVMCALL_WATCH_PARAM)vmcall_instruction)->ID);
 
       }
-     // else
+      else
+      {
+        sendstringf("hasEPTsupport==0\n");
+        vmregisters->rax = 0xcedead;
+      }
+      break;
+    }
+
+    case VMCALL_WATCH_READS:
+    {
+      sendstringf("VMCALL_WATCH_READS\n");
+      if (hasEPTsupport)
+      {
+        vmregisters->rax=vmcall_watch_activate((PVMCALL_WATCH_PARAM)vmcall_instruction,EPTW_READWRITE); //read
+      }
+      else
       {
         vmregisters->rax = 0xcedead;
       }
       break;
     }
 
+    case VMCALL_WATCH_EXECUTES:
+    {
+      sendstringf("VMCALL_WATCH_EXECUTES\n");
+      if (hasEPTsupport)
+      {
+        vmregisters->rax=vmcall_watch_activate((PVMCALL_WATCH_PARAM)vmcall_instruction,EPTW_EXECUTE); //read
+      }
+      else
+      {
+        vmregisters->rax = 0xcedead;
+      }
+      break;
+    }
+
+    case VMCALL_WATCH_DELETE:
+    {
+      sendstringf("VMCALL_WATCH_DELETE\n");
+      vmregisters->rax=vmcall_watch_delete((PVMCALL_WATCH_DISABLE_PARAM)vmcall_instruction);
+      break;
+    }
+
+    case VMCALL_WATCH_RETRIEVELOG:
+    {
+      //sendstringf("VMCALL_WATCH_RETRIEVELOG\n");
+      return vmcall_watch_retrievelog(vmregisters, (PVMCALL_WATCH_RETRIEVELOG_PARAM)vmcall_instruction);
+    }
+
+    case VMCALL_CLOAK_ACTIVATE:
+    {
+      if (hasEPTsupport)
+        vmregisters->rax=ept_cloak_activate(((PVMCALL_CLOAK_ACTIVATE_PARAM)vmcall_instruction)->physicalAddress);
+      else
+        vmregisters->rax=0xcedead;
+
+      break;
+    }
+
+
+    case VMCALL_CLOAKEX_ACTIVATE:
+    {
+      //same as cloak but lets you specify a small section of the page, and also data cloaks and a filter to see who should see/access the original
+      if (hasEPTsupport)
+      {
+        /*
+        vmregisters->rax=ept_cloakex_activate(((PVMCALL_CLOAKEX_ACTIVATE_PARAM)vmcall_instruction)->physicalAddress,
+                                              ((PVMCALL_CLOAKEX_ACTIVATE_PARAM)vmcall_instruction)->size,
+                                              ((PVMCALL_CLOAKEX_ACTIVATE_PARAM)vmcall_instruction)->whitelist_ipfromrange,
+                                              ((PVMCALL_CLOAKEX_ACTIVATE_PARAM)vmcall_instruction)->whitelist_iptorange,
+                                              ((PVMCALL_CLOAKEX_ACTIVATE_PARAM)vmcall_instruction)->whitelist_cr3,
+                                              ((PVMCALL_CLOAKEX_ACTIVATE_PARAM)vmcall_instruction)->whitelist_flags);
+*/
+
+      }
+      else
+        vmregisters->rax=0xcedead;
+
+      break;
+    }
+    /*
+    case VMCALL_CLOAK_ADDTOWHITELIST:
+    {
+      //whitelists a CR3 and/or RIP (
+      if (hasEPTsupport)
+        vmregisters->rax=ept_cloak_addtowhitelist(((PVMCALL_CLOAKEX_ACTIVATE_PARAM)vmcall_instruction)->physicalAddress,
+                                                  ((PVMCALL_CLOAK_WHITELIST)vmcall_instruction)->CR3,
+                                                  ((PVMCALL_CLOAK_WHITELIST)vmcall_instruction)->RIP);
+      else
+        vmregisters->rax=0xcedead;
+
+      break;
+    }
+
+    case VMCALL_CLOAK_REMOVEFROMWHITELIST:
+    {
+      if (hasEPTsupport)
+        vmregisters->rax=ept_cloak_removefromwhitelist(((PVMCALL_CLOAKEX_ACTIVATE_PARAM)vmcall_instruction)->physicalAddress,
+                                                       ((PVMCALL_CLOAK_WHITELIST)vmcall_instruction)->CR3,
+                                                       ((PVMCALL_CLOAK_WHITELIST)vmcall_instruction)->RIP);
+      else
+        vmregisters->rax=0xcedead;
+
+      break;
+    }
+
+    case VMCALL_CLOAK_STARTACCESSWATCH:
+    {
+      if (hasEPTsupport)
+        vmregisters->rax=ept_cloak_startaccesswatch(((PVMCALL_CLOAKEX_ACTIVATE_PARAM)vmcall_instruction)->physicalAddress,
+                                                    ((PVMCALL_CLOAKEX_ACTIVATE_PARAM)vmcall_instruction)->maxcount);
+      else
+        vmregisters->rax=0xcedead;
+
+      break;
+    }
+
+    case VMCALL_CLOAK_FETCHACCESSWATCHRESULTS:
+    {
+      //returns a list of CR3 and RIP's and if they read or write, or both
+      if (hasEPTsupport)
+        vmregisters->rax=ept_cloak_fetchaccesswatchresults(((PVMCALL_CLOAKEX_ACTIVATE_PARAM)vmcall_instruction)->physicalAddress);
+      else
+        vmregisters->rax=0xcedead;
+
+      break;
+    }
+
+    case VMCALL_CLOAK_STOPACCESSWATCH:
+    {
+      if (hasEPTsupport)
+        vmregisters->rax=ept_cloak_stopaccesswatch(((PVMCALL_CLOAKEX_ACTIVATE_PARAM)vmcall_instruction)->physicalAddress);
+      else
+        vmregisters->rax=0xcedead;
+
+      break;
+    }*/
+
+
+    case VMCALL_CLOAK_DEACTIVATE:
+    {
+      if (hasEPTsupport)
+        vmregisters->rax=ept_cloak_deactivate(((PVMCALL_CLOAK_DEACTIVATE_PARAM)vmcall_instruction)->physicalAddress);
+      else
+        vmregisters->rax=0xcedead;
+
+      break;
+    }
+
+    case VMCALL_CLOAK_READORIGINAL:
+    {
+      if (hasEPTsupport)
+        return ept_cloak_readOriginal(currentcpuinfo, vmregisters, ((PVMCALL_CLOAK_READ_PARAM)vmcall_instruction)->physicalAddress, ((PVMCALL_CLOAK_READ_PARAM)vmcall_instruction)->destination);
+      else
+        vmregisters->rax=0xcedead;
+
+      break;
+    }
+
+    case VMCALL_CLOAK_WRITEORIGINAL:
+    {
+      if (hasEPTsupport)
+        return ept_cloak_writeOriginal(currentcpuinfo, vmregisters, ((PVMCALL_CLOAK_WRITE_PARAM)vmcall_instruction)->physicalAddress, ((PVMCALL_CLOAK_WRITE_PARAM)vmcall_instruction)->source);
+      else
+        vmregisters->rax=0xcedead;
+
+      break;
+    }
+
+    case VMCALL_CLOAK_CHANGEREGONBP:
+    {
+      if (hasEPTsupport)
+        vmregisters->rax=ept_cloak_changeregonbp(((PVMCALL_CLOAK_CHANGEREG_PARAM)vmcall_instruction)->physicalAddress, &((PVMCALL_CLOAK_CHANGEREG_PARAM)vmcall_instruction)->changereginfo);
+      else
+        vmregisters->rax=0xcedead;
+
+      break;
+    }
+
+    case VMCALL_CLOAK_REMOVECHANGEREGONBP:
+    {
+      if (hasEPTsupport)
+        vmregisters->rax=ept_cloak_removechangeregonbp(((PVMCALL_CLOAK_REMOVECHANGEREG_PARAM)vmcall_instruction)->physicalAddress);
+      else
+        vmregisters->rax=0xcedead;
+      break;
+    }
+
+    case VMCALL_EPT_RESET:
+    {
+      ept_reset();
+      vmregisters->rax=0;
+      break;
+    }
+
+    case VMCALL_LOG_CR3VALUES_START:
+    {
+
+      //Todo: When CR3 exiting has been disabled, add an enable exit on CR3 change
+
+      if (CR3ValueLog)
+      {
+        vmregisters->rax=0;
+        break;
+      }
+
+      csEnter(&CR3ValueLogCS);
+      CR3ValuePos=0;
+      CR3ValueLog=malloc(4096);
+      zeromemory(CR3ValueLog,4096);
+      csLeave(&CR3ValueLogCS);
+
+      vmregisters->rax=1;
+      break;
+    }
+
+    case VMCALL_LOG_CR3VALUES_STOP:
+    {
+      PVMCALL_LOGCR3_STOP_PARAM param=(PVMCALL_LOGCR3_STOP_PARAM)vmcall_instruction;
+
+      if (CR3ValueLog==NULL)
+      {
+        vmregisters->rax=0;
+        break;
+      }
+
+      csEnter(&CR3ValueLogCS);
+
+      //copy to the destination
+      if (CR3ValuePos)
+      {
+        int error;
+        QWORD pagefaultaddress;
+        void *destination=mapVMmemory(currentcpuinfo, param->destination, 4096, &error, &pagefaultaddress);
+
+        if (error)
+        {
+          csLeave(&CR3ValueLogCS);
+          if (error==2)
+          {
+            return raisePagefault(currentcpuinfo, pagefaultaddress);
+          }
+          else
+          {
+            vmregisters->rax=0x100+error;
+            break;
+          }
+        }
+        copymem(destination, CR3ValueLog, 4096);
+        unmapVMmemory(destination, 4096);
+      }
+
+      CR3ValuePos=0;
+      free(CR3ValueLog);
+      CR3ValueLog=NULL;
+      csLeave(&CR3ValueLogCS);
+
+      vmregisters->rax=1;
+      break;
+    }
+
+    case VMCALL_REGISTERPLUGIN:
+    {
+      int error;
+      QWORD pagefaultaddress;
+      PVMCALL_REGISTER_PLUGIN_PARAM p=(PVMCALL_REGISTER_PLUGIN_PARAM)vmcall_instruction;
+
+      if (p->internalAddress==0)
+      {
+        QWORD FullPages;
+        getTotalFreeMemory(&FullPages);
+
+        if (p->bytesize>(FullPages*4096))
+        {
+          vmregisters->rax=1; //not enough memory
+          break;
+        }
+
+        p->internalAddress=(QWORD)malloc(p->bytesize);
+        p->bytescopied=0;
+      }
+
+      QWORD startaddressSource=p->virtualAddress+p->bytescopied;
+      int blocksize=p->bytesize-p->bytescopied;
+
+      void *source=mapVMmemoryEx(currentcpuinfo, startaddressSource, blocksize, &error, &pagefaultaddress, 1);
+      void *destination=(void *)(p->internalAddress+p->bytescopied);
+
+      if (error)
+      {
+        if (error==2)
+          blocksize=pagefaultaddress-startaddressSource;
+        else
+        {
+          vmregisters->rax=0x100+error;
+          break;
+        }
+      }
+
+      if (blocksize)
+      {
+        //copy what you can
+        copymem(destination, source, blocksize);
+        p->bytescopied+=blocksize;
+
+        unmapVMmemory(source, blocksize);
+        source=NULL;
+
+        if (p->bytescopied==p->bytesize)
+        {
+          //copy done
+          if (p->type==0)
+            dbvm_plugin_exit_pre=(DBVM_PLUGIN_EXIT_PRE *)p->internalAddress;
+          else
+            dbvm_plugin_exit_post=(DBVM_PLUGIN_EXIT_POST *)p->internalAddress;
+
+          vmregisters->rax=0; //success
+          break;
+        }
+      }
+
+      //still here, so not everything copied
+      if ((error) && (error==2)) //just making sure, but should be the case yes
+      {
+        return raisePagefault(currentcpuinfo, pagefaultaddress);
+      }
+      else
+      {
+        sendstringf("Copy failed without pagefault\n");
+        vmregisters->rax=2;
+        break;
+      }
+
+      return 0; //handled it myself (don't change RIP)
+    }
+
+    case VMCALL_RAISEPMI:
+    {
+      vmwrite(vm_guest_rip,vmread(vm_guest_rip)+vmread(vm_exit_instructionlength)); //go after this instruction
+      return raisePMI();
+    }
+
+    case VMCALL_ULTIMAP2_HIDERANGEUSAGE:
+    {
+      vmx_setMSRReadExit(IA32_RTIT_CTL_MSR);
+      vmregisters->rax = 0;
+      break;
+    }
+
+    case VMCALL_ADD_MEMORY:
+    {
+      PVMCALL_ADD_MEMORY_PARAM p=(PVMCALL_ADD_MEMORY_PARAM)vmcall_instruction;
+      int pagecount=(p->vmcall.size-sizeof(VMCALL_ADD_MEMORY_PARAM)) / 8;
+
+      nosendchar[getAPICID()]=0;
+      sendstringf("VMCALL_ADD_MEMORY\n");
+      mmAddPhysicalPageListToDBVM(p->PhysicalPages, pagecount);
+      vmregisters->rax = pagecount; //0;
+      break;
+    }
+
+    case VMCALL_SETTSCADJUST:
+    {
+      PVMCALL_SETTSCADJUST_PARAM p=(PVMCALL_SETTSCADJUST_PARAM)vmcall_instruction;
+      adjustTimestampCounterTimeout=p->timeout;
+      adjustTimestampCounters=p->enabled;
+      break;
+    }
+
+    case VMCALL_SETSPEEDHACK:
+    {
+      PVMCALL_SETSPEEDHACK_PARAM p=(PVMCALL_SETSPEEDHACK_PARAM)vmcall_instruction;
+      speedhack_setspeed(p->speedhackspeed);
+      break;
+    }
+
+    /*
+    case VMCALL_DISABLE_EPT:
+    {
+      vmregisters->rax=hasEPTsupport;
+      if (hasEPTsupport)
+      {
+        QWORD secondarycontrols=vmread(vm_execution_controls_cpu_secondary);
+        secondarycontrols=secondarycontrols & (~(QWORD)SPBEF_ENABLE_EPT);
+        secondarycontrols=secondarycontrols & (~(QWORD)SPBEF_ENABLE_UNRESTRICTED);
+        vmwrite(vm_execution_controls_cpu_secondary, secondarycontrols);
+        vmwrite(vm_eptpointer,0);
+
+        if (hasUnrestrictedSupport)
+        {
+          //also remove this
+          vmwrite(vm_entry_controls, vmread(vm_entry_controls) & (~(QWORD)VMENTRYC_LOAD_IA32_EFER));
+          vmwrite(vm_exit_controls, vmread(vm_exit_controls) & (~(QWORD)VMEXITC_SAVE_IA32_EFER ));
+          vmwrite(vm_exit_controls, vmread(vm_exit_controls) & (~(QWORD)VMEXITC_LOAD_IA32_EFER ));
+
+
+          hasUnrestrictedSupport=0;
+
+          vmx_setMSRReadExit(0x80);
+          vmx_setMSRWriteExit(0x80);
+
+          vmwrite(vm_cr0_guest_host_mask,(UINT64)IA32_VMX_CR0_FIXED0);
+        }
+
+        hasEPTsupport=0;
+      }
+      break;
+    }
+    */
+
+#ifdef STATISTICS
+    case VMCALL_GET_STATISTICS:
+    {
+    	int globaleventcounter[56];
+    	QWORD totalevents=0;
+    	pcpuinfo c=firstcpuinfo;
+    	PVMCALL_GET_STATISTICS_PARAM p=(PVMCALL_GET_STATISTICS_PARAM)vmcall_instruction;
+    	copymem(&p->eventcounter[0],&currentcpuinfo->eventcounter[0],sizeof(int)*56);
+
+    	zeromemory(&globaleventcounter[0],sizeof(int)*56);
+    	while (c)
+    	{
+    		int i;
+    		for (i=0;i<56;i++)
+    		{
+    			globaleventcounter[i]+=c->eventcounter[i];
+    			totalevents+=c->eventcounter[i];
+    		}
+
+    		c=c->next;
+    	}
+
+    	copymem(&p->globaleventcounter[0],&globaleventcounter[0],sizeof(int)*56);
+
+
+    	vmregisters->rax=totalevents;
+    	break;
+    }
+#endif
+
+  case VMCALL_CAUSEDDEBUGBREAK:
+  {
+    vmregisters->rax=currentcpuinfo->BPCausedByDBVM;
+    currentcpuinfo->BPCausedByDBVM=0;
+    break;
+  }
+
+
+	case VMCALL_KERNELMODE:
+	{
+		WORD newCS = *(WORD*)&vmcall_instruction[3];
+		vmregisters->rax = VMCALL_SwitchToKernelMode(currentcpuinfo, newCS);
+		break;
+	}
+	case VMCALL_USERMODE:
+	{
+		vmregisters->rax = VMCALL_ReturnToUserMode(currentcpuinfo);
+		break;
+	}
 
     default:
       vmregisters->rax = 0xcedead;
@@ -1251,6 +2033,7 @@ int _handleVMCall(pcpuinfo currentcpuinfo, VMRegisters *vmregisters)
       int r=handleRealModeInt0x15(currentcpuinfo, vmregisters, vmread(vm_exit_instructionlength));
 
       sendstringf("handleRealModeInt0x15 returned %d (should be 0)\n",r);
+      ddDrawRectangle(0,DDVerticalResolution-100,100,100,0xff0000);
       if (r)
       {
         while (1);
@@ -1260,7 +2043,7 @@ int _handleVMCall(pcpuinfo currentcpuinfo, VMRegisters *vmregisters)
   }
 
 
-  sendstringf("Handling vm(m)call on cpunr:%d \n\r", currentcpuinfo->cpunr);
+ // sendstringf("Handling vm(m)call on cpunr:%d \n\r", currentcpuinfo->cpunr);
 
   if (isAMD)
     vmregisters->rax=currentcpuinfo->vmcb->RAX; //fill it in, it may get used here
@@ -1276,10 +2059,10 @@ int _handleVMCall(pcpuinfo currentcpuinfo, VMRegisters *vmregisters)
     return x;
   }
 
-  sendstringf("Password1 is valid\n\r");
+  //sendstringf("Password1 is valid\n\r");
 
 
-  sendstringf("vmregisters->rax=%6\n\r", vmregisters->rax);
+ // sendstringf("vmregisters->rax=%6\n\r", vmregisters->rax);
 
   //still here, so password1 is valid
   //map the memory of the information structure
@@ -1297,10 +2080,10 @@ int _handleVMCall(pcpuinfo currentcpuinfo, VMRegisters *vmregisters)
     return raiseInvalidOpcodeException(currentcpuinfo);
   }
 
-  sendstringf("Mapped vmcall instruction structure (vmcall_instruction=%6)\n\r",(UINT64)vmcall_instruction);
-  sendstringf("vmcall_instruction[0]=%8\n\r",vmcall_instruction[0]);
-  sendstringf("vmcall_instruction[1]=%8\n\r",vmcall_instruction[1]);
-  sendstringf("vmcall_instruction[2]=%8\n\r",vmcall_instruction[2]);
+  //sendstringf("Mapped vmcall instruction structure (vmcall_instruction=%6)\n\r",(UINT64)vmcall_instruction);
+ //sendstringf("vmcall_instruction[0]=%8\n\r",vmcall_instruction[0]);
+  //sendstringf("vmcall_instruction[1]=%8\n\r",vmcall_instruction[1]);
+  //sendstringf("vmcall_instruction[2]=%8\n\r",vmcall_instruction[2]);
 
 
 
@@ -1314,22 +2097,29 @@ int _handleVMCall(pcpuinfo currentcpuinfo, VMRegisters *vmregisters)
 
   int vmcall_instruction_size=vmcall_instruction[0];
 
+  if (vmcall_instruction_size>16*1024)
+  {
+    sendstringf("Invalid vmcall_instruction_size:%d : Exceeds the 16KB max size for vmcall data structures\n");
+    unmapVMmemory(vmcall_instruction,12);
+    return raiseInvalidOpcodeException(currentcpuinfo);
+  }
+
   //still here, so password valid and data structure paged in memory
-  if (vmcall_instruction[0]>12) //remap to take the extra parameters into account
+  if (vmcall_instruction_size>12) //remap to take the extra parameters into account
   {
 //    sendstringf("Remapping to support size: %8\n\r",vmcall_instruction[0]);
-    int neededsize=vmcall_instruction[0];
+    int neededsize=vmcall_instruction_size;
     unmapVMmemory(vmcall_instruction, vmcall_instruction_size);
     vmcall_instruction=(ULONG *)mapVMmemory(currentcpuinfo, vmregisters->rax, neededsize, &error, &pagefaultaddress);
   }
 
 #ifdef DEBUG
-  int totaldwords = vmcall_instruction[0] / 4;
-  int i;
-  for (i=3; i<totaldwords; i++)
-  {
-    sendstringf("vmcall_instruction[%d]=%x\n\r",i, vmcall_instruction[i]);
-  }
+  //int totaldwords = vmcall_instruction[0] / 4;
+  //int i;
+  //for (i=3; i<totaldwords; i++)
+  //{
+  //  sendstringf("vmcall_instruction[%d]=%x\n\r",i, vmcall_instruction[i]);
+  //}
 #endif
 
 
@@ -1346,7 +2136,7 @@ int _handleVMCall(pcpuinfo currentcpuinfo, VMRegisters *vmregisters)
   }
 
 
-  sendstringf("Handling vmcall command %d\n\r",vmcall_instruction[2]);
+  //sendstringf("Handling vmcall command %d\n\r",vmcall_instruction[2]);
 
   int r=_handleVMCallInstruction(currentcpuinfo, vmregisters, vmcall_instruction);
   unmapVMmemory(vmcall_instruction, vmcall_instruction_size);
@@ -1366,8 +2156,10 @@ int handleVMCall(pcpuinfo currentcpuinfo, VMRegisters *vmregisters)
   }
   except
   {
+    int err=lastexception;
+
     nosendchar[getAPICID()]=0;
-    sendstringf("Exception %x happened during handling of VMCALL\n", lastexception);
+    sendstringf("Exception %x happened during handling of VMCALL\n", err);
 
     try
     {
@@ -1376,6 +2168,7 @@ int handleVMCall(pcpuinfo currentcpuinfo, VMRegisters *vmregisters)
     except
     {
       sendstringf("no jtag available\n");
+      ddDrawRectangle(0,DDVerticalResolution-100,100,100,0xff0000);
       while (1);
     }
     tryend

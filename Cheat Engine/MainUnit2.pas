@@ -6,15 +6,22 @@ unit MainUnit2;
 
 interface
 
-uses windows, dialogs,forms,classes,LCLIntf, LCLProc, sysutils,registry,ComCtrls, menus,
+uses
+     {$ifdef darwin}
+     macport, macexceptiondebuggerinterface,
+     {$endif}
+     {$ifdef windows}
+     windows,
+     {$endif}
+     dialogs,forms,classes,LCLIntf, LCLProc, sysutils,registry,ComCtrls, menus,
      formsettingsunit, cefuncproc,AdvancedOptionsUnit, MemoryBrowserFormUnit,
-     memscan,plugin, hotkeyhandler,frmProcessWatcherunit, newkernelhandler,
+     memscan,plugin, hotkeyhandler,frmProcessWatcherUnit, newkernelhandler,
      debuggertypedefinitions, commonTypeDefs;
 
-const ceversion=6.7;
+const ceversion=7.1;
 
 resourcestring
-  cename = 'Cheat Engine 6.7';
+  cename = 'Cheat Engine 7.1';
   rsPleaseWait = 'Please Wait!';
 
 procedure UpdateToolsMenu;
@@ -24,7 +31,7 @@ procedure initcetitle;
 
 
 
-const beta=''; //empty this for a release
+const beta=' rc1'; //empty this for a release
 
 var
   CEnorm:string;
@@ -60,6 +67,7 @@ resourcestring
 
   strChangedValue='Changed value';
   strUnchangedValue='Unchanged value';
+  strIgnoreValue='Ignore value';
   strUnknownInitialValue='Unknown initial value';
   strCompareToFirstScan='Compare to first scan';
   strCompareToLastScan='Compare to last scan';
@@ -73,6 +81,7 @@ resourcestring
   rsNoHotkey = 'No hotkey';
   rsEnableDisableSpeedhack = 'Enable/Disable speedhack.';
   rsM2NoHotkey = ' (No hotkey)';
+  rsWontHaveAnyEffectUntilYouOpenANewProcess = '(Won''t have any effect until you (re)open a process)';
 
 
   var
@@ -89,7 +98,7 @@ implementation
 
 
 uses KernelDebugger,mainunit, DebugHelper, CustomTypeHandler, ProcessList, Globals,
-     frmEditHistoryUnit, DBK32functions;
+     frmEditHistoryUnit, DBK32functions, frameHotkeyConfigUnit, UnexpectedExceptionsHelper;
 
 procedure UpdateToolsMenu;
 var i: integer;
@@ -119,14 +128,17 @@ end;
 procedure LoadSettingsFromRegistry(skipPlugins: boolean=false);
 var reg : TRegistry;
     i,j: integer;
-    temphotkeylist: array [0..30] of commontypedefs.tkeycombo;
+    temphotkeylist: array [0..cehotkeycount-1] of commontypedefs.tkeycombo;
     found:boolean;
     names: TStringList;
     li: tlistitem;
     s,s2: string;
 begin
-  ZeroMemory(@temphotkeylist, 31*sizeof(commontypedefs.tkeycombo));
+  ZeroMemory(@temphotkeylist, cehotkeycount*sizeof(commontypedefs.tkeycombo));
   if formsettings=nil then exit;
+
+  s:=formsettings.ClassName;
+  if s<>'TformSettings' then exit;
 
   try
     reg:=Tregistry.Create;
@@ -217,7 +229,6 @@ begin
 
           mainform.UndoScan.visible:=cbshowundo.checked;
 
-          {$ifndef net}
           if reg.ValueExists('hotkey poll interval') then
             hotkeyPollInterval:=reg.ReadInteger('hotkey poll interval')
           else
@@ -231,10 +242,10 @@ begin
           frameHotkeyConfig.edtKeypollInterval.text:=inttostr(hotkeyPollInterval);
           frameHotkeyConfig.edtHotkeyDelay.text:=inttostr(hotkeyIdletime);
 
-          SuspendHotkeyHandler;
+
 
           if reg.ValueExists('Speedhack 1 speed') then
-            speedhackspeed1.speed:=reg.ReadFloat('Speedhack 1 speed')
+            speedhackspeed1.speed:={$ifdef windows}reg.ReadFloat('Speedhack 1 speed'){$else}strtofloat(reg.ReadString('Speedhack 1 speed')){$endif} //readString as there is a stack corruption in readFloat on unix
           else
             speedhackspeed1.speed:=1;
 
@@ -243,7 +254,7 @@ begin
 
 
           if reg.ValueExists('Speedhack 2 speed') then
-            speedhackspeed2.speed:=reg.ReadFloat('Speedhack 2 speed')
+            speedhackspeed2.speed:={$ifdef windows}reg.ReadFloat('Speedhack 2 speed'){$else}strtofloat(reg.ReadString('Speedhack 2 speed')){$endif}
           else
             speedhackspeed2.speed:=1;
 
@@ -253,7 +264,7 @@ begin
 
 
           if reg.ValueExists('Speedhack 3 speed') then
-            speedhackspeed3.speed:=reg.ReadFloat('Speedhack 3 speed')
+            speedhackspeed3.speed:={$ifdef windows}reg.ReadFloat('Speedhack 3 speed'){$else}strtofloat(reg.ReadString('Speedhack 3 speed')){$endif}
           else
             speedhackspeed3.speed:=1;
 
@@ -261,7 +272,7 @@ begin
             speedhackspeed3.disablewhenreleased:=reg.ReadBool('Speedhack 3 disablewhenreleased');
 
           if reg.ValueExists('Speedhack 4 speed') then
-            speedhackspeed4.speed:=reg.ReadFloat('Speedhack 4 speed')
+            speedhackspeed4.speed:={$ifdef windows}reg.ReadFloat('Speedhack 4 speed'){$else}strtofloat(reg.ReadString('Speedhack 4 speed')){$endif}
           else
             speedhackspeed4.speed:=1;
 
@@ -270,7 +281,7 @@ begin
 
 
           if reg.ValueExists('Speedhack 5 speed') then
-            speedhackspeed5.speed:=reg.ReadFloat('Speedhack 5 speed')
+            speedhackspeed5.speed:={$ifdef windows}reg.ReadFloat('Speedhack 5 speed'){$else}strtofloat(reg.ReadString('Speedhack 4 speed')){$endif}
           else
             speedhackspeed5.speed:=1;
 
@@ -280,167 +291,307 @@ begin
 
 
           if reg.ValueExists('Increase Speedhack delta') then
-            speedupdelta:=reg.ReadFloat('Increase Speedhack delta')
+            speedupdelta:={$ifdef windows}reg.ReadFloat('Increase Speedhack delta'){$else}strtofloat(reg.ReadString('Increase Speedhack delta')){$endif}
           else
             speedupdelta:=1;
 
           if reg.ValueExists('Decrease Speedhack delta') then
-            slowdowndelta:=reg.ReadFloat('Decrease Speedhack delta')
+            slowdowndelta:={$ifdef windows}reg.ReadFloat('Decrease Speedhack delta'){$else}strtofloat(reg.ReadString('Decrease Speedhack delta')){$endif}
           else
             slowdowndelta:=1;
 
 
+
+          SuspendHotkeyHandler;
+
+
+
+
+          if reg.ValueExists('Attach to foregroundprocess Hotkey') then
+            {$ifdef windows}
+            reg.ReadBinaryData('Attach to foregroundprocess Hotkey',temphotkeylist[0][0],10);
+            {$else}
+            HexToBin(pchar(reg.ReadString('Attach to foregroundprocess Hotkey')),pchar(@temphotkeylist[0][0]),10);
+            {$endif}
+
+
           if reg.ValueExists('Show Cheat Engine Hotkey') then
-            reg.ReadBinaryData('Show Cheat Engine Hotkey',temphotkeylist[0][0],10);
+            {$ifdef windows}
+            reg.ReadBinaryData('Show Cheat Engine Hotkey',temphotkeylist[1][0],10);
+            {$else}
+            HexToBin(pchar(reg.ReadString('Show Cheat Engine Hotkey')),pchar(@temphotkeylist[1][0]),10);
+            {$endif}
 
           if reg.ValueExists('Pause process Hotkey') then
-            reg.ReadBinaryData('Pause process Hotkey',temphotkeylist[1][0],10);
+            {$ifdef windows}
+            reg.ReadBinaryData('Pause process Hotkey',temphotkeylist[2][0],10);
+            {$else}
+            HexToBin(pchar(reg.ReadString('Pause process Hotkey')),pchar(@temphotkeylist[2][0]),10);
+            {$endif}
+
+
 
           if reg.ValueExists('Toggle speedhack Hotkey') then
-            reg.ReadBinaryData('Toggle speedhack Hotkey',temphotkeylist[2][0],10);
+            {$ifdef windows}
+            reg.ReadBinaryData('Toggle speedhack Hotkey',temphotkeylist[3][0],10);
+            {$else}
+            HexToBin(pchar(reg.ReadString('Toggle speedhack Hotkey')),pchar(@temphotkeylist[3][0]),10);
+            {$endif}
 
           if reg.ValueExists('Set Speedhack speed 1 Hotkey') then
-            reg.ReadBinaryData('Set Speedhack speed 1 Hotkey',temphotkeylist[3][0],10);
+            {$ifdef windows}
+            reg.ReadBinaryData('Set Speedhack speed 1 Hotkey',temphotkeylist[4][0],10);
+            {$else}
+            HexToBin(pchar(reg.ReadString('Set Speedhack speed 1 Hotkey')),pchar(@temphotkeylist[4][0]),10);
+            {$endif}
 
-          speedhackspeed1.keycombo:=temphotkeylist[3];
+          speedhackspeed1.keycombo:=temphotkeylist[4];
 
           if reg.ValueExists('Set Speedhack speed 2 Hotkey') then
-            reg.ReadBinaryData('Set Speedhack speed 2 Hotkey',temphotkeylist[4][0],10);
+            {$ifdef windows}
+            reg.ReadBinaryData('Set Speedhack speed 2 Hotkey',temphotkeylist[5][0],10);
+            {$else}
+            HexToBin(pchar(reg.ReadString('Set Speedhack speed 2 Hotkey')),pchar(@temphotkeylist[5][0]),10);
+            {$endif}
 
-          speedhackspeed2.keycombo:=temphotkeylist[4];
+          speedhackspeed2.keycombo:=temphotkeylist[5];
 
           if reg.ValueExists('Set Speedhack speed 3 Hotkey') then
-            reg.ReadBinaryData('Set Speedhack speed 3 Hotkey',temphotkeylist[5][0],10);
+            {$ifdef windows}
+            reg.ReadBinaryData('Set Speedhack speed 3 Hotkey',temphotkeylist[6][0],10);
+            {$else}
+            HexToBin(pchar(reg.ReadString('Set Speedhack speed 3 Hotkey')),pchar(@temphotkeylist[6][0]),10);
+            {$endif}
 
-          speedhackspeed3.keycombo:=temphotkeylist[5];
+          speedhackspeed3.keycombo:=temphotkeylist[6];
 
           if reg.ValueExists('Set Speedhack speed 4 Hotkey') then
-            reg.ReadBinaryData('Set Speedhack speed 4 Hotkey',temphotkeylist[6][0],10);
+            {$ifdef windows}
+            reg.ReadBinaryData('Set Speedhack speed 4 Hotkey',temphotkeylist[7][0],10);
+            {$else}
+            HexToBin(pchar(reg.ReadString('Set Speedhack speed 4 Hotkey')),pchar(@temphotkeylist[7][0]),10);
+            {$endif}
 
-          speedhackspeed4.keycombo:=temphotkeylist[6];
+          speedhackspeed4.keycombo:=temphotkeylist[7];
 
           if reg.ValueExists('Set Speedhack speed 5 Hotkey') then
-            reg.ReadBinaryData('Set Speedhack speed 5 Hotkey',temphotkeylist[7][0],10);
+            {$ifdef windows}
+            reg.ReadBinaryData('Set Speedhack speed 5 Hotkey',temphotkeylist[8][0],10);
+            {$else}
+            HexToBin(pchar(reg.ReadString('Set Speedhack speed 5 Hotkey')),pchar(@temphotkeylist[8][0]),10);
+            {$endif}
 
-          speedhackspeed5.keycombo:=temphotkeylist[7];
+          speedhackspeed5.keycombo:=temphotkeylist[8];
 
           if reg.ValueExists('Increase Speedhack speed') then
-            reg.ReadBinaryData('Increase Speedhack speed',temphotkeylist[8][0],10);
+            {$ifdef windows}
+            reg.ReadBinaryData('Increase Speedhack speed',temphotkeylist[9][0],10);
+            {$else}
+            HexToBin(pchar(reg.ReadString('Increase Speedhack speed')),pchar(@temphotkeylist[9][0]),10);
+            {$endif}
 
           if reg.ValueExists('Decrease Speedhack speed') then
-            reg.ReadBinaryData('Decrease Speedhack speed',temphotkeylist[9][0],10);
+            {$ifdef windows}
+            reg.ReadBinaryData('Decrease Speedhack speed',temphotkeylist[10][0],10);
+            {$else}
+            HexToBin(pchar(reg.ReadString('Decrease Speedhack speed')),pchar(@temphotkeylist[10][0]),10);
+            {$endif}
 
           if reg.ValueExists('Binary Hotkey') then
-            reg.ReadBinaryData('Binary Hotkey',temphotkeylist[10][0],10);
+            {$ifdef windows}
+            reg.ReadBinaryData('Binary Hotkey',temphotkeylist[11][0],10);
+            {$else}
+            HexToBin(pchar(reg.ReadString('Binary Hotkey')),pchar(@temphotkeylist[11][0]),10);
+            {$endif}
 
           if reg.ValueExists('Byte Hotkey') then
-            reg.ReadBinaryData('Byte Hotkey',temphotkeylist[11][0],10);
+            {$ifdef windows}
+            reg.ReadBinaryData('Byte Hotkey',temphotkeylist[12][0],10);
+            {$else}
+            HexToBin(pchar(reg.ReadString('Byte Hotkey')),pchar(@temphotkeylist[12][0]),10);
+            {$endif}
 
           if reg.ValueExists('2 Bytes Hotkey') then
-            reg.ReadBinaryData('2 Bytes Hotkey',temphotkeylist[12][0],10);
+            {$ifdef windows}
+            reg.ReadBinaryData('2 Bytes Hotkey',temphotkeylist[13][0],10);
+            {$else}
+            HexToBin(pchar(reg.ReadString('2 Bytes Hotkey')),pchar(@temphotkeylist[13][0]),10);
+            {$endif}
 
           if reg.ValueExists('4 Bytes Hotkey') then
-            reg.ReadBinaryData('4 Bytes Hotkey',temphotkeylist[13][0],10);
+            {$ifdef windows}
+            reg.ReadBinaryData('4 Bytes Hotkey',temphotkeylist[14][0],10);
+            {$else}
+            HexToBin(pchar(reg.ReadString('4 Bytes Hotkey')),pchar(@temphotkeylist[14][0]),10);
+            {$endif}
 
           if reg.ValueExists('8 Bytes Hotkey') then
-            reg.ReadBinaryData('8 Bytes Hotkey',temphotkeylist[14][0],10);
+            {$ifdef windows}
+            reg.ReadBinaryData('8 Bytes Hotkey',temphotkeylist[15][0],10);
+            {$else}
+            HexToBin(pchar(reg.ReadString('8 Bytes Hotkey')),pchar(@temphotkeylist[15][0]),10);
+            {$endif}
 
           if reg.ValueExists('Float Hotkey') then
-            reg.ReadBinaryData('Float Hotkey',temphotkeylist[15][0],10);
+            {$ifdef windows}
+            reg.ReadBinaryData('Float Hotkey',temphotkeylist[16][0],10);
+            {$else}
+            HexToBin(pchar(reg.ReadString('Float Hotkey')),pchar(@temphotkeylist[16][0]),10);
+            {$endif}
 
           if reg.ValueExists('Double Hotkey') then
-            reg.ReadBinaryData('Double Hotkey',temphotkeylist[16][0],10);
+            {$ifdef windows}
+            reg.ReadBinaryData('Double Hotkey',temphotkeylist[17][0],10);
+            {$else}
+            HexToBin(pchar(reg.ReadString('Double Hotkey')),pchar(@temphotkeylist[17][0]),10);
+            {$endif}
 
           if reg.ValueExists('Text Hotkey') then
-            reg.ReadBinaryData('Text Hotkey',temphotkeylist[17][0],10);
+            {$ifdef windows}
+            reg.ReadBinaryData('Text Hotkey',temphotkeylist[18][0],10);
+            {$else}
+            HexToBin(pchar(reg.ReadString('Text Hotkey')),pchar(@temphotkeylist[18][0]),10);
+            {$endif}
 
           if reg.ValueExists('Array of Byte Hotkey') then
-            reg.ReadBinaryData('Array of Byte Hotkey',temphotkeylist[18][0],10);
+            {$ifdef windows}
+            reg.ReadBinaryData('Array of Byte Hotkey',temphotkeylist[19][0],10);
+            {$else}
+            HexToBin(pchar(reg.ReadString('Array of Byte Hotkey')),pchar(@temphotkeylist[19][0]),10);
+            {$endif}
 
           if reg.ValueExists('New Scan Hotkey') then
-            reg.ReadBinaryData('New Scan Hotkey',temphotkeylist[19][0],10);
+            {$ifdef windows}
+            reg.ReadBinaryData('New Scan Hotkey',temphotkeylist[20][0],10);
+            {$else}
+            HexToBin(pchar(reg.ReadString('New Scan Hotkey')),pchar(@temphotkeylist[20][0]),10);
+            {$endif}
 
           if reg.ValueExists('New Scan-Exact Value') then
-            reg.ReadBinaryData('New Scan-Exact Value',temphotkeylist[20][0],10);
+            {$ifdef windows}
+            reg.ReadBinaryData('New Scan-Exact Value',temphotkeylist[21][0],10);
+            {$else}
+            HexToBin(pchar(reg.ReadString('New Scan-Exact Value')),pchar(@temphotkeylist[21][0]),10);
+            {$endif}
 
           if reg.ValueExists('Unknown Initial Value Hotkey') then
-            reg.ReadBinaryData('Unknown Initial Value Hotkey',temphotkeylist[21][0],10);
+            {$ifdef windows}
+            reg.ReadBinaryData('Unknown Initial Value Hotkey',temphotkeylist[22][0],10);
+            {$else}
+            HexToBin(pchar(reg.ReadString('Unknown Initial Value Hotkey')),pchar(@temphotkeylist[22][0]),10);
+            {$endif}
 
           if reg.ValueExists('Next Scan-Exact Value') then
-            reg.ReadBinaryData('Next Scan-Exact Value',temphotkeylist[22][0],10);
+            {$ifdef windows}
+            reg.ReadBinaryData('Next Scan-Exact Value',temphotkeylist[23][0],10);
+            {$else}
+            HexToBin(pchar(reg.ReadString('Next Scan-Exact Value')),pchar(@temphotkeylist[23][0]),10);
+            {$endif}
 
           if reg.ValueExists('Increased Value Hotkey') then
-            reg.ReadBinaryData('Increased Value Hotkey',temphotkeylist[23][0],10);
+            {$ifdef windows}
+            reg.ReadBinaryData('Increased Value Hotkey',temphotkeylist[24][0],10);
+            {$else}
+            HexToBin(pchar(reg.ReadString('Increased Value Hotkey')),pchar(@temphotkeylist[24][0]),10);
+            {$endif}
 
           if reg.ValueExists('Decreased Value Hotkey') then
-            reg.ReadBinaryData('Decreased Value Hotkey',temphotkeylist[24][0],10);
+            {$ifdef windows}
+            reg.ReadBinaryData('Decreased Value Hotkey',temphotkeylist[25][0],10);
+            {$else}
+            HexToBin(pchar(reg.ReadString('Decreased Value Hotkey')),pchar(@temphotkeylist[25][0]),10);
+            {$endif}
 
           if reg.ValueExists('Changed Value Hotkey') then
-            reg.ReadBinaryData('Changed Value Hotkey',temphotkeylist[25][0],10);
+            {$ifdef windows}
+            reg.ReadBinaryData('Changed Value Hotkey',temphotkeylist[26][0],10);
+            {$else}
+            HexToBin(pchar(reg.ReadString('Changed Value Hotkey')),pchar(@temphotkeylist[26][0]),10);
+            {$endif}
 
           if reg.ValueExists('Unchanged Value Hotkey') then
-            reg.ReadBinaryData('Unchanged Value Hotkey',temphotkeylist[26][0],10);
+            {$ifdef windows}
+            reg.ReadBinaryData('Unchanged Value Hotkey',temphotkeylist[27][0],10);
+            {$else}
+            HexToBin(pchar(reg.ReadString('Unchanged Value Hotkey')),pchar(@temphotkeylist[27][0]),10);
+            {$endif}
 
           if reg.ValueExists('Same as first scan Hotkey') then
-            reg.ReadBinaryData('Same as first scan Hotkey',temphotkeylist[27][0],10);
+            {$ifdef windows}
+            reg.ReadBinaryData('Same as first scan Hotkey',temphotkeylist[28][0],10);
+            {$else}
+            HexToBin(pchar(reg.ReadString('Same as first scan Hotkey')),pchar(@temphotkeylist[28][0]),10);
+            {$endif}
 
           if reg.ValueExists('Undo Last scan Hotkey') then
-            reg.ReadBinaryData('Undo Last scan Hotkey',temphotkeylist[28][0],10);
+            {$ifdef windows}
+            reg.ReadBinaryData('Undo Last scan Hotkey',temphotkeylist[29][0],10);
+            {$else}
+            HexToBin(pchar(reg.ReadString('Undo Last scan Hotkey')),pchar(@temphotkeylist[29][0]),10);
+            {$endif}
 
           if reg.ValueExists('Cancel scan Hotkey') then
-            reg.ReadBinaryData('Cancel scan Hotkey',temphotkeylist[29][0],10);
+            {$ifdef windows}
+            reg.ReadBinaryData('Cancel scan Hotkey',temphotkeylist[30][0],10);
+            {$else}
+            HexToBin(pchar(reg.ReadString('Cancel scan Hotkey')),pchar(@temphotkeylist[30][0]),10);
+            {$endif}
 
           if reg.ValueExists('Debug->Run Hotkey') then
-            reg.ReadBinaryData('Debug->Run Hotkey',temphotkeylist[30][0],10);
-
-
+            {$ifdef windows}
+            reg.ReadBinaryData('Debug->Run Hotkey',temphotkeylist[31][0],10);
+            {$else}
+            HexToBin(pchar(reg.ReadString('Debug->Run Hotkey')),pchar(@temphotkeylist[31][0]),10);
+            {$endif}
 
           //fill the hotkeylist
-          for i:=0 to 30 do
+
+          if hotkeythread<>nil then
           begin
-            found:=false;
-
-            for j:=0 to length(hotkeythread.hotkeylist)-1 do
+            for i:=0 to cehotkeycount-1 do
             begin
-              if (hotkeythread.hotkeylist[j].id=i) and (hotkeythread.hotkeylist[j].handler2) then
+              found:=false;
+
+              for j:=0 to length(hotkeythread.hotkeylist)-1 do
               begin
-                //found it
-                hotkeythread.hotkeylist[j].keys:=temphotkeylist[i];
-                found:=true;
-                break;
+                if (hotkeythread.hotkeylist[j].id=i) and (hotkeythread.hotkeylist[j].handler2) then
+                begin
+                  //found it
+                  hotkeythread.hotkeylist[j].keys:=temphotkeylist[i];
+                  found:=true;
+                  break;
+                end;
               end;
-            end;
 
-            if not found then //add it
-            begin
-              j:=length(hotkeythread.hotkeylist);
-              setlength(hotkeythread.hotkeylist,j+1);
-              hotkeythread.hotkeylist[j].keys:=temphotkeylist[i];
-              hotkeythread.hotkeylist[j].windowtonotify:=mainform.Handle;
-              hotkeythread.hotkeylist[j].id:=i;
-              hotkeythread.hotkeylist[j].handler2:=true;
-            end;
+              if not found then //add it
+              begin
+                j:=length(hotkeythread.hotkeylist);
+                setlength(hotkeythread.hotkeylist,j+1);
+                hotkeythread.hotkeylist[j].keys:=temphotkeylist[i];
+                hotkeythread.hotkeylist[j].windowtonotify:=mainform.Handle;
+                hotkeythread.hotkeylist[j].id:=i;
+                hotkeythread.hotkeylist[j].handler2:=true;
+              end;
 
-            checkkeycombo(temphotkeylist[i]);
+              checkkeycombo(temphotkeylist[i]);
+            end;
           end;
 
-          if temphotkeylist[1][0]<>0 then
-            advancedoptions.pausehotkeystring:='('+ConvertKeyComboToString(temphotkeylist[1])+')'
+          if temphotkeylist[2][0]<>0 then
+            advancedoptions.pausehotkeystring:='('+ConvertKeyComboToString(temphotkeylist[2])+')'
           else
             advancedoptions.pausehotkeystring:=' ('+rsNoHotkey+')';
 
 
 
-          if temphotkeylist[2][0]<>0 then
+          if temphotkeylist[3][0]<>0 then
             mainform.cbSpeedhack.Hint:=rsEnableDisableSpeedhack+' ('+
-              ConvertKeyComboToString(temphotkeylist[2])+')'
+              ConvertKeyComboToString(temphotkeylist[3])+')'
           else
             mainform.cbSpeedhack.Hint:=rsEnableDisableSpeedhack+rsM2NoHotkey;
 
 
           ResumeHotkeyHandler;
-
-          {$endif}
 
           if reg.ValueExists('Buffersize') then
             buffersize:=reg.readInteger('Buffersize')
@@ -548,15 +699,8 @@ begin
             cbProcessIcons.Checked:=reg.ReadBool('Get process icons');
           GetProcessIcons:=cbProcessIcons.Checked;
 
-
-          if reg.ValueExists('Only show processes with icon') then
-            cbProcessIconsOnly.checked:=reg.ReadBool('Only show processes with icon');
-
           if reg.ValueExists('Pointer appending') then
             cbOldPointerAddMethod.checked:=reg.ReadBool('Pointer appending');
-
-          cbProcessIconsOnly.Enabled:=cbProcessIcons.Checked;
-          ProcessesWithIconsOnly:=cbProcessIconsOnly.Checked;
 
 
           if reg.ValueExists('skip PAGE_NOCACHE') then
@@ -564,10 +708,21 @@ begin
             
           Skip_PAGE_NOCACHE:=cbSkip_PAGE_NOCACHE.Checked;
 
+          if reg.ValueExists('skip PAGE_WRITECOMBINE') then
+            cbSkip_PAGE_WRITECOMBINE.Checked:=reg.readbool('skip PAGE_WRITECOMBINE');
+
+          Skip_PAGE_WRITECOMBINE:=cbSkip_PAGE_WRITECOMBINE.Checked;
+
+
           if reg.ValueExists('Pause when scanning on by default') then
             cbPauseWhenScanningOnByDefault.Checked:=reg.readbool('Pause when scanning on by default');
 
           MainForm.cbPauseWhileScanning.Checked:=cbPauseWhenScanningOnByDefault.checked;
+
+          if reg.ValueExists('Repeat Delay') then
+            Globals.repeatDelay:=reg.ReadInteger('Repeat Delay');
+
+          formsettings.edtRepeatDelay.text:=inttostr(Globals.repeatDelay);
 
 
           if reg.ValueExists('Hide all windows') then
@@ -604,6 +759,7 @@ begin
           try unrandomizersettings.defaultreturn:=reg.ReadInteger('Unrandomizer: default value'); except end;
           try unrandomizersettings.incremental:=reg.ReadBool('Unrandomizer: incremental'); except end;
 
+          {$ifdef windows}
           if reg.ValueExists('ModuleList as Denylist') then
             DenyList:=reg.ReadBool('ModuleList as Denylist')
           else
@@ -619,12 +775,12 @@ begin
           else
             modulelistsize:=0;
             
-          if modulelist<>nil then freemem(modulelist);
+          if modulelist<>nil then freememandnil(modulelist);
           getmem(modulelist,modulelistsize);
 
           if reg.ValueExists('Module List') then
             reg.ReadBinaryData('Module List',ModuleList^,ModuleListSize);
-
+          {$endif}
 
 
           if reg.ValueExists('Don''t use tempdir') then
@@ -644,6 +800,7 @@ begin
           if reg.ValueExists('Use Processwatcher') then
             cbProcessWatcher.checked:=reg.readBool('Use Processwatcher');
 
+          {$ifdef windows}
           if reg.ValueExists('Use VEH Debugger') then
             cbUseVEHDebugger.Checked:=reg.ReadBool('Use VEH Debugger');
 
@@ -658,10 +815,43 @@ begin
 
           if reg.ValueExists('Use Kernel Debugger') then
             cbKdebug.checked:=reg.ReadBool('Use Kernel Debugger');
+          {$endif}
 
           if reg.ValueExists('Wait After Gui Update') then
             waitafterguiupdate:=reg.ReadBool('Wait After Gui Update');
           cbWaitAfterGuiUpdate.checked:=waitafterguiupdate;
+
+          {$ifdef darwin}
+          cbUseMacDebugger.checked:=true;
+
+          if reg.ValueExists('Use TaskLevel debugger') then
+            useTaskLevelDebug:=reg.ReadBool('Use TaskLevel debugger');
+
+          {$endif}
+
+
+          if reg.ValueExists('Unexpected Breakpoint Behaviour') then
+          begin
+            case reg.ReadInteger('Unexpected Breakpoint Behaviour') of
+              0:
+              begin
+                miUnexpectedBreakpointsIgnore.checked:=true;
+                UnexpectedExceptionAction:=ueaIgnore;
+              end;
+
+              1:
+              begin
+                miUnexpectedBreakpointsBreak.checked:=true;
+                UnexpectedExceptionAction:=ueaBreak;
+              end;
+
+              2:
+              begin
+                miUnexpectedBreakpointsBreakWhenInsideRegion.checked;
+                UnexpectedExceptionAction:=ueaBreakIfInRegion;
+              end;
+            end;
+          end;
 
 
           if reg.ValueExists('Use Global Debug Routines') then
@@ -672,16 +862,17 @@ begin
 
           mainform.ools1.Visible:=cbShowTools.Checked;
 
-
+          {$ifdef windows}
 
           if cbKernelQueryMemoryRegion.checked then UseDBKQueryMemoryRegion else DontUseDBKQueryMemoryRegion;
           if cbKernelReadWriteProcessMemory.checked then UseDBKReadWriteMemory else DontUseDBKReadWriteMemory;
           if cbKernelOpenProcess.Checked then UseDBKOpenProcess else DontUseDBKOpenProcess;
 
           if cbProcessWatcher.Checked then
-            if (frmProcessWatcher=nil) then //propably yes
+            if (frmProcessWatcher=nil) then //probably yes
               frmProcessWatcher:=tfrmprocesswatcher.Create(mainform); //start the process watcher
 
+          {$endif}
 
 
           if reg.ValueExists('WriteLogging') then
@@ -695,6 +886,12 @@ begin
 
           logWrites:=cbWriteLoggingOn.checked;
 
+          if reg.ValueExists('Never Change Protection') then
+            cbNeverChangeProtection.checked:=reg.ReadBool('Never Change Protection');
+
+          SkipVirtualProtectEx:=cbNeverChangeProtection.checked;
+
+
           if reg.ValueExists('Show Language MenuItem') then
             cbShowLanguageMenuItem.Checked:=reg.ReadBool('Show Language MenuItem');
 
@@ -706,6 +903,7 @@ begin
           if reg.ValueExists('Override Default Font') then
             cbOverrideDefaultFont.Checked:=reg.readbool('Override Default Font');
 
+          {$ifdef windows}
           {$ifdef privatebuild}
           if reg.ValueExists('DoNotOpenProcessHandles') then
             cbDontOpenHandle.Checked:=reg.readbool('DoNotOpenProcessHandles');
@@ -726,6 +924,7 @@ begin
           ProcessWatcherOpensHandles:=false;
           useapctoinjectdll:=false;
           {$endif}
+          {$endif}
 
           if reg.ValueExists('Always Sign Table') then
             cbAlwaysSignTable.Checked:=reg.readBool('Always Sign Table');
@@ -733,6 +932,40 @@ begin
           if reg.ValueExists('Always Ask For Password') then
             cbAlwaysAskForPassword.Checked:=reg.readBool('Always Ask For Password');
 
+
+          if reg.ValueExists('collectgarbage passive') then
+            cbLuaPassiveGarbageCollection.checked:=reg.ReadBool('collectgarbage passive');
+
+          if reg.ValueExists('collectgarbage active') then
+            cbLuaGarbageCollectAll.checked:=reg.ReadBool('collectgarbage active');
+
+          if reg.ValueExists('collectgarbage timer') then
+            edtLuaCollectTimer.text:=inttostr(reg.ReadInteger('collectgarbage timer'));
+
+          if reg.ValueExists('collectgarbage only when bigger') then
+            cbLuaOnlyCollectWhenLarger.checked:=reg.ReadBool('collectgarbage only when bigger');
+
+          if reg.ValueExists('collectgarbage minsize') then
+            edtLuaMinCollectSize.text:=inttostr(reg.ReadInteger('collectgarbage minsize'));
+
+          if cbLuaGarbageCollectAll.checked then
+          begin
+            mainform.tLuaGCActive.interval:=strtoint(edtLuaCollectTimer.text)*1000;
+
+            if cbLuaOnlyCollectWhenLarger.checked then
+              luagc_MinSize:=strtoint(edtLuaMinCollectSize.text)
+            else
+              luagc_MinSize:=0;
+          end;
+          mainform.tLuaGCActive.enabled:=cbLuaGarbageCollectAll.checked;
+          mainform.tLuaGCPassive.enabled:=cbLuaPassiveGarbageCollection.checked;
+
+
+          if reg.ValueExists('use thread to freeze') then
+          begin
+            cbUseThreadForFreeze.checked:=reg.ReadBool('use thread to freeze');
+            mainform.UseThreadToFreeze:=cbUseThreadForFreeze.checked;
+          end;
         end;
 
 
@@ -744,7 +977,7 @@ begin
       begin
         names:=TStringList.create;
         try
-          reg.GetValueNames(names);
+          reg.GetValueNames(names); //fpc 3.2.0 can raise an exception here as well
           names.sort;
           for i:=0 to names.count-1 do
           begin
@@ -769,9 +1002,9 @@ begin
             except
             end;
           end;
-        finally
-          names.free;
+        except
         end;
+        freeandnil(names);
       end;
       UpdateToolsMenu;
 
@@ -830,8 +1063,10 @@ begin
   {$ifdef net}
   MemoryBrowser.Kerneltools1.visible:=false;
   {$else}
-  MemoryBrowser.Kerneltools1.Enabled:=DBKLoaded;
+  MemoryBrowser.Kerneltools1.Enabled:={$ifdef windows}DBKLoaded{$else}false{$endif};
   {$endif}
+
+
 
   if mainform.autoattachlist<>nil then
   begin
@@ -850,6 +1085,14 @@ end;
 procedure initcetitle;
 begin
   CEnorm:=cename+BETA;  //.';
+
+{$ifdef XDEBUG}
+  CEnorm:=CENorm+' Debug Build';
+{$endif}
+{$ifdef darwin}
+  CEnorm:=CENorm+' MacOS version';
+{$endif}
+
   Application.Title:=CENorm;
 
 
@@ -859,6 +1102,9 @@ begin
   CEWait:= ceregion;
   mainform.Caption:=CENorm;
 end;
+
+initialization
+  OutputDebugString('MainUnit2');
 
 end.
 

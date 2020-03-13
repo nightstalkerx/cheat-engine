@@ -4,6 +4,8 @@
 #include "common.h"
 #include "vmreadwrite.h"
 #include "vmxcontrolstructures.h"
+#include "eptstructs.h"
+#include "exports.h"
 
 
 extern int vmxstartup;
@@ -368,7 +370,18 @@ typedef volatile struct _vmcb
 
 } __attribute__((__packed__)) vmcb, *pvmcb;
 
+typedef struct _singlestepreason
+{
+  int Reason;
+      //1=EPT watch event single step (Restore page back to non write/ non  read)
+      //2=EPT cloak event (Put the old executable page back and mark as non read/write)
+      //3=change reg on bp event (restored the int3 bp (0xcc))
 
+
+  int ID; //index of the array used for this reason (watchlist, cloaklist, changeregonbplist) (About to become obsolete and replaced by the data pointer)
+
+  void* Data; //pointer to the object for this reason (watchlist, cloaklist, changeregonbplist)
+} SingleStepReason, *PSingleStepReason;
 
 typedef volatile struct tcpuinfo
 {
@@ -376,6 +389,10 @@ typedef volatile struct tcpuinfo
   volatile struct tcpuinfo *next; //must be offset 0x8
   DWORD guest_error; //must be offset 0x10
   DWORD cpunr; //must be offset 0x14
+  QWORD lasttsc; //must be offset 0x18
+  QWORD totaltsctaken; //must be offset 0x20
+  QWORD lastTSCTouch;
+  QWORD lowestTSC;
   DWORD active;
   DWORD apicid;
 
@@ -556,11 +573,49 @@ typedef volatile struct tcpuinfo
 
     int currenterrorcode; //if not 0, return this errorcode on vmread
     vmxhoststate originalhoststate;
+    vmxhoststate dbvmhoststate;
     int runningvmx; //1 if the previous call was a vmlaunch/vmresume and no vmexit happened yet
 
   } vmxdata;
 
   QWORD EPTPML4;
+  criticalSection EPTPML4CS; // since other cpu's can map in pages for other cpu's as well, use a CS
+  /*
+  PEPT_PTE *eptCloakList; //pointer to the EPT entry of the index related to CloakedPages
+  int eptCloakListLength;
+  */
+  int eptCloak_LastOperationWasWrite;
+  QWORD eptCloak_LastWriteOffset;
+
+  PEPT_PTE *eptWatchList; //pointer to the EPT entry of the index related to the WatchList
+  int eptWatchListLength;
+  int eptUpdated;
+
+
+
+
+  struct //single stepping data
+  {
+    int Method;
+
+    SingleStepReason *Reasons;
+    int ReasonsPos;
+    int ReasonsLength;
+  } singleStepping;
+
+  int BPAfterStep;
+  int BPCausedByDBVM; //gets read out by ce's driver to see if the bp was because of DBVM or not
+
+#ifdef STATISTICS
+  int eventcounter[56];
+#endif
+
+  struct {
+    UINT64 RFLAGS, CR4;
+    WORD CS, SS;
+  } SwitchKernel;
+
+  int LastVMCall;
 
 } tcpuinfo, *pcpuinfo; //allocated when the number of cpu's is known
 
@@ -641,6 +696,8 @@ typedef struct _regCR4
 #define CR4_FSGSBASE    (1<<16)
 #define CR4_PCIDE       (1<<17)
 #define CR4_OSXSAVE     (1<<18)
+#define CR4_SMEP		(1<<20)
+#define CR4_SMAP		(1<<21)
 
 #define CR0_PE          (1<<0)
 #define CR0_NE          (1<<5)
@@ -731,8 +788,8 @@ void displayPhysicalMemory();
 void setupTSS8086(void);
 
 void launchVMX(pcpuinfo currentcpuinfo);
-int vmexit(tcpuinfo *cpu, UINT64 *registers);
-int vmexit_amd(pcpuinfo currentcpuinfo, UINT64 *registers);
+int vmexit(tcpuinfo *cpu, UINT64 *registers, void *fxsave);
+int vmexit_amd(pcpuinfo currentcpuinfo, UINT64 *registers, void *fxsave);
 
 void sendvmstate(pcpuinfo currentcpuinfo, VMRegisters *registers);
 char *getVMInstructionErrorString(void);
@@ -754,5 +811,15 @@ extern volatile DWORD initcs;
 
 int APStartsInSIPI;
 extern pcpuinfo getcpuinfo();
+
+
+typedef BOOL DBVM_PLUGIN_EXIT_PRE(PDBVMExports exports, pcpuinfo currentcpuinfo, void *registers, void *fxsave);
+typedef void DBVM_PLUGIN_EXIT_POST(PDBVMExports exports, pcpuinfo currentcpuinfo, void *registers, void *fxsave, int *DBVMResult);
+
+extern DBVM_PLUGIN_EXIT_PRE *dbvm_plugin_exit_pre;
+extern DBVM_PLUGIN_EXIT_POST *dbvm_plugin_exit_post;
+
+
+
 
 #endif /*VMMHELPER_H_*/

@@ -12,6 +12,8 @@ handles the communication while it itself is going back to listen to new connect
 
 interface
 
+{$ifdef windows}
+
 uses
   jwawindows, windows, Classes, SysUtils, lua, lauxlib, lualib, LuaHandler;
 
@@ -59,7 +61,11 @@ var luaservers: TList;
 
 function luaserverExists(name: string): boolean;
 
+{$endif}
+
 implementation
+
+{$ifdef windows}
 
 resourcestring
   rsALuaserverWithTheName = 'A luaserver with the name ';
@@ -245,7 +251,7 @@ begin
 
       lua_getglobal(lvm, pchar(functionname));
 
-      freemem(functionname);
+      FreeMemAndNil(functionname);
     end;
 
     //the function is now pushed on the lua stack
@@ -292,7 +298,7 @@ begin
           tempstring[stringlength]:=#0;
           lua.lua_pushstring(lvm, tempstring);
 
-          freemem(tempstring);
+          FreeMemAndNil(tempstring);
         end;
 
        { 4: //table
@@ -492,7 +498,7 @@ begin
         error;
 
     finally
-      freemem(script);
+      FreeMemAndNil(script);
     end;
   end
   else
@@ -548,7 +554,7 @@ begin
         error;
 
     finally
-      freemem(script);
+      FreeMemAndNil(script);
     end;
   end
   else
@@ -634,8 +640,13 @@ begin
   inherited destroy;
 end;
 
+{$endif}
+
 initialization
+
+  {$ifdef windows}
   luaservers:=TList.create;
+  {$endif}
 
 
 end.

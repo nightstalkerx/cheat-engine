@@ -101,6 +101,17 @@ pop rbx
 pop rax
 ret
 
+mrewlock:
+
+
+;------------------------------------------------------------------;
+;void lockedQwordIncrement(volatile QWORD *address, QWORD inccount);
+;------------------------------------------------------------------;
+global lockedQwordIncrement
+lockedQwordIncrement:
+lock add qword [rdi],rsi
+ret
+
 ;---------------------------;
 ;int spinlock(int *lockvar);
 ;---------------------------;
@@ -116,35 +127,8 @@ cmp dword [rdi],0
 je spinlock
 jmp spinlock_wait
 
-;old implementation
-spinlock_old:
 
-;rdi contains the address of the lock
 
-spinlock_loop:
-;serialize
-push rbx
-push rcx
-push rdx
-xor eax,eax
-cpuid ;serialize
-pop rdx
-pop rcx
-pop rbx
-
-;check lock
-cmp dword [rdi],0
-je spinlock_getlock
-pause
-jmp spinlock_loop
-
-spinlock_getlock:
-mov eax,1
-xchg eax,dword [rdi] ;try to lock
-cmp eax,0 ;test if successful, if eax=0 then that means it was unlocked
-jne spinlock_loop
-
-ret
 
 global enableserial
 enableserial:
@@ -222,23 +206,56 @@ popfq
 
 ret
 
-global call32bit
-call32bit:
+global call32bita
+call32bita:
 ;switch to a 32-bit code segment, call the given function, and return back to 64-bit
+;rdi=address
+;rsi=temp stack address
+
+mov qword [rsi],rsp
+sub rsi,8
+mov rsp,rsi
 mov eax,edi
+
 jmp far [call32bit_32bitcodeaddress]
 
 call32bit_32bitcodeaddress:
 dd call32bit_32bitcode
-dw 24
+dw 88
 
 BITS 32
 call32bit_32bitcode:
+nop
+mov dx,0x8
+mov ss,dx
+mov es,dx
+mov ds,dx
+mov esp,esi
+nop
+nop
+push eax
+pop ebx
+nop
 call eax
+nop
+nop
 jmp 80:call32bit_64bitcode
 
 BITS 64
 call32bit_64bitcode:
+nop
+nop
+mov dx,0
+mov ds,dx
+mov es,dx
+mov ss,dx
+mov ss,dx
+
+add rsp,8
+mov rdx,[rsp]
+mov rsp,rdx
+
+
 ret
 
 

@@ -4,28 +4,91 @@ unit LuaInternet;
 
 interface
 
+
+
+
 uses
-  Classes, SysUtils, wininet;
+  Classes, SysUtils
+  {$ifdef windows}, wininet
+  {$else}
+  , fphttpclient,opensslsockets,openssl
 
+  {$endif}
+  ;
+
+{$ifndef standalone}
 procedure initializeLuaInternet;
-
-implementation
-
-uses mainunit2, lua, LuaClass, LuaObject, luahandler, URIParser;
+{$endif}
 
 type
   TWinInternet=class
   private
+    {$ifdef windows}
     internet: HINTERNET;
     fheader: string;
+    {$else}
+    internet: TFPHTTPClient;
+    procedure setHeader(s: string);
+    function getHeader: string;
+    {$endif}
   public
     function getURL(urlstring: string; results: tstream): boolean;
     function postURL(urlstring: string; urlencodedpostdata: string; results: tstream): boolean;
     constructor create(name: string);
     destructor destroy; override;
   published
+    {$ifdef windows}
     property Header: string read fheader write fheader;
+    {$else}
+    property Header: string read getHeader write setHeader;
+    {$endif}
   end;
+
+
+implementation
+
+uses {$ifndef standalone}MainUnit2, lua, LuaClass, LuaObject, LuaHandler,{$endif} URIParser;
+
+{$ifndef windows}
+procedure TWinInternet.setHeader(s: string);
+begin
+  internet.RequestHeaders.Text:=s;
+end;
+
+function TWinInternet.getHeader: string;
+begin
+  result:=internet.RequestHeaders.Text;
+end;
+
+function TWinInternet.postURL(urlstring: string; urlencodedpostdata: string; results: tstream): boolean;
+var response: tstrings;
+begin
+  result:=false;
+  response:=tstringlist.Create;
+  try
+    internet.FormPost(urlstring,urlencodedpostdata,response);
+    result:=true;
+    results.WriteAnsiString(response.text);
+  except
+  end;
+
+  freeandnil(response);
+
+end;
+
+function TWinInternet.getURL(urlstring: string; results: tstream): boolean;
+begin
+  result:=false;
+  try
+    internet.Get(urlstring, results);
+    result:=true;
+  except
+
+  end;
+
+end;
+
+{$else}
 
 function TWinInternet.postURL(urlstring: string; urlencodedpostdata: string; results: tstream): boolean;
 var
@@ -43,6 +106,8 @@ var
   username, password: pchar;
 
   h: string;
+  requestflags: dword;
+  err: integer;
 begin
   h:='Content-Type: application/x-www-form-urlencoded';
 
@@ -51,11 +116,20 @@ begin
   begin
     //InternetConnect(internet, );
 
+    requestflags:=INTERNET_FLAG_PRAGMA_NOCACHE;
+
     u:=ParseURI(urlstring);
 
     port:=INTERNET_DEFAULT_HTTP_PORT;
     if lowercase(u.Protocol)='https' then
+    begin
       port:=INTERNET_DEFAULT_HTTPS_PORT;
+      requestflags:=requestflags or INTERNET_FLAG_SECURE;
+    end
+    else
+    begin
+//      requestflags:=requestflags or INTERNET_FLAG_NO_AUTO_REDIRECT;
+    end;
 
     if u.Port<>0 then
       port:=u.port;
@@ -76,7 +150,7 @@ begin
     c:=InternetConnect(internet, pchar(u.Host), port, username, password, INTERNET_SERVICE_HTTP, 0,0);
     if c<>nil then
     begin
-      r:=HttpOpenRequest(c, PChar('POST'), pchar(u.path+u.Document+u.Params), nil, nil, nil, INTERNET_FLAG_PRAGMA_NOCACHE, 0);
+      r:=HttpOpenRequest(c, PChar('POST'), pchar(u.path+u.Document+u.Params), nil, nil, nil, requestflags, 0);
       if r<>nil then
       begin
         if HttpSendRequest(r,pchar(h),length(h),pchar(urlencodedpostdata), length(urlencodedpostdata)) then
@@ -95,9 +169,17 @@ begin
                 result:=true; //something was read
               end;
             finally
-              freemem(buf);
+              FreeMemAndNil(buf);
             end;
           end;
+        end
+        else
+        begin
+          err:=getLastOSError;
+
+          if err=0 then beep;
+
+
         end;
 
         InternetCloseHandle(r);
@@ -139,26 +221,46 @@ begin
           result:=true; //something was read
         end;
       finally
-        freemem(buf);
+        FreeMemAndNil(buf);
       end;
     end;
 
     InternetCloseHandle(url);
   end;
 end;
+{$endif}
 
 constructor TWinInternet.create(name: string);
 begin
+  {$ifdef windows}
   internet:=InternetOpen(pchar(name),0, nil, nil,0);
+  {$else}
+
+  openssl.DLLVersions[1]:=openssl.DLLVersions[2];
+  openssl.DLLVersions[1]:='.46';
+  openssl.DLLVersions[2]:='.44';
+  InitSSLInterface;
+  openssl.ErrClearError;
+
+  internet:=TFPHTTPClient.Create(nil);
+  internet.AddHeader('User-Agent',name);
+  {$endif}
 end;
 
 destructor TWinInternet.destroy;
 begin
   if internet<>nil then
+  {$ifdef windows}
     InternetCloseHandle(internet);
+  {$else}
+    freeandnil(internet);
+  {$endif}
+
 
   inherited destroy;
 end;
+
+{$ifndef standalone}
 
 function getInternet(L: Plua_State): integer; cdecl;
 begin
@@ -233,8 +335,7 @@ var
 
 initialization
   luaclass_register(TWinInternet, wininternet_addMetaData);
-
-
+{$endif}
 
 end.
 

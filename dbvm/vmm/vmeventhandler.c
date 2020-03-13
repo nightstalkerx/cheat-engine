@@ -21,12 +21,39 @@ vmeventhandler.c: This will handle the events
 #include "vmxemu.h"
 #include "epthandler.h"
 #include "vmxsetup.h"
+#include "displaydebug.h"
 
 
 #ifndef DEBUG
 #define sendstringf(s,x...)
 #define sendstring(s)
 #endif
+
+criticalSection CR3ValueLogCS;
+QWORD *CR3ValueLog; //if not NULL, record
+int CR3ValuePos;
+
+//volatile QWORD TSCOffset=0;
+volatile QWORD globalTSC;
+volatile QWORD lowestTSC=0;
+
+int adjustTimestampCounters=1;
+int adjustTimestampCounterTimeout=2000;
+
+int useSpeedhack=0;
+double speedhackSpeed=1.0f;
+QWORD speedhackInitialOffset=0;
+QWORD speedhackInitialTime=0;
+
+
+//QWORD cpuidTime=6000; //todo: Make this changeable by the user after launch, or instead of using a TSCOffset just tell the next rdtsc calls to difference of 30 or less (focussing on the currentcpu, or just for 6000 actual ticks)
+//QWORD rdtscTime=6000;
+//QWORD rdtscpTime=10;
+
+criticalSection TSCCS;
+
+int handle_rdtsc(pcpuinfo currentcpuinfo, VMRegisters *vmregisters);
+
 
 int raiseNMI(void)
 {
@@ -36,6 +63,42 @@ int raiseNMI(void)
   newintinfo.interruption_information=0;
   newintinfo.interruptvector=2; //NMI
   newintinfo.type=2; //NMI
+  newintinfo.haserrorcode=0;
+  newintinfo.valid=1;
+
+  vmwrite(vm_entry_interruptioninfo, newintinfo.interruption_information); //entry info field
+  vmwrite(vm_entry_exceptionerrorcode, 0); //entry errorcode
+  vmwrite(vm_entry_instructionlength, vmread(vm_exit_instructionlength)); //entry instruction length
+  return 0;
+}
+
+int raisePMI()
+{
+  //get the pmi interrupt number from the APIC
+  int interruptvector;
+  DWORD LVT_Perfmon_Counter_Register;
+  VMEntry_interruption_information newintinfo;
+
+  if (readMSR(IA32_APICBASE_MSR) & (1<<10))  //x2apic
+  {
+    LVT_Perfmon_Counter_Register=readMSR(IA32_X2APIC_LVT_PMI_MSR);
+
+    writeMSR(IA32_X2APIC_LVT_PMI_MSR, LVT_Perfmon_Counter_Register | (1<<16)); //set bit 16 (the mask bit)
+  }
+  else
+  {
+    LVT_Perfmon_Counter_Register=*(volatile DWORD *)(IA32_APIC_BASE+0x340);
+
+    *(volatile DWORD *)(IA32_APIC_BASE+0x340)=LVT_Perfmon_Counter_Register | (1 << 16);
+  }
+
+  interruptvector=LVT_Perfmon_Counter_Register & 0xff;
+
+  sendstringf("Raising PMI (Vector %d)\n",interruptvector);
+
+  newintinfo.interruption_information=0;
+  newintinfo.interruptvector=interruptvector;
+  newintinfo.type=itExternal; //external
   newintinfo.haserrorcode=0;
   newintinfo.valid=1;
 
@@ -61,6 +124,7 @@ int raiseGeneralProtectionFault(UINT64 errorcode)
   vmwrite(vm_entry_instructionlength, vmread(vm_exit_instructionlength)); //entry instruction length
   return 0;
 }
+
 
 
 int emulateExceptionInterrupt(pcpuinfo currentcpuinfo, VMRegisters *vmregisters, unsigned int cs, UINT64 rip, int haserrorcode, UINT64 errorcode, int isFault)
@@ -591,6 +655,26 @@ void returnToRealmode(pcpuinfo currentcpuinfo) //obsolete with rm emu
   }
 }
 
+int handleINIT(pcpuinfo currentcpuinfo, VMRegisters *vmregisters)
+{
+  UINT64 a,b,c,d;
+  zeromemory(vmregisters,sizeof(VMRegisters));
+
+  //magic
+  a=1;
+  _cpuid(&a,&b,&c,&d);
+  vmregisters->rdx=a;
+
+
+  setup8086WaitForSIPI(currentcpuinfo,0);
+
+  vmwrite(vm_guest_rsp,0);
+  vmwrite(vm_guest_rip,0);
+
+
+  return 0;
+}
+
 int handleSIPI(void)
 {
   UINT64 newcs,newcsbase,newip;
@@ -634,11 +718,15 @@ int handle_cr3_callback(pcpuinfo currentcpuinfo,VMRegisters *vmregisters)
   nosendchar[getAPICID()]=0;
   sendstringf("Handling cr3 edit. Is %x wants to set it to %x:\n\r", vmread(0x6802), currentcpuinfo->guestCR3);
   sendstring("Also, currently not implemented so no idea how this happened\n\r");
+
+  ddDrawRectangle(0,DDVerticalResolution-100,100,100,0xff0000);
   while (1);
 
 
   //sendstringf("before:\n\r");
   //sendvmstate(currentcpuinfo,vmregisters);
+
+
 
   if (currentcpuinfo->cr3_callback.called_callback)
   {
@@ -715,7 +803,7 @@ int handle_cr3_callback(pcpuinfo currentcpuinfo,VMRegisters *vmregisters)
 
 
   //interrupt state
-  currentcpuinfo->cr3_callback.interruptability_state=vmread(0x4824);
+  currentcpuinfo->cr3_callback.interruptability_state=vmread(vm_guest_interruptability_state);
 
 
   //sendstringf("saved state: cs:eip=%x:%x\n\r",currentcpuinfo->cr3_callback.cs_selector, currentcpuinfo->cr3_callback.rip);
@@ -814,7 +902,7 @@ int handle_cr3_callback(pcpuinfo currentcpuinfo,VMRegisters *vmregisters)
 
 
 
-  vmwrite(0x4824, (1<<3)); //block by NMI, so even a nmi based taskswitch won't interrupt
+  vmwrite(vm_guest_interruptability_state, (1<<3)); //block by NMI, so even a nmi based taskswitch won't interrupt
 
   //and set IF to 0 in eflags
   currentcpuinfo->Previous_CLI=(vmread(vm_guest_rflags) >> 9) & 1;
@@ -1311,11 +1399,12 @@ int handleIOAccess(VMRegisters *vmregisters UNUSED)
   }
 
 
+  vmregisters->rax=vmregisters->rax | 0xff;
+  return 0;
 
   switch (iodata.portnr)
   {
-    vmregisters->rax=vmregisters->rax | 0xff;
-    return 0;
+
 
 
     case SERIALPORT: //3f8
@@ -1512,8 +1601,28 @@ int handleWRMSR(pcpuinfo currentcpuinfo, VMRegisters *vmregisters)
 
   switch (msr)
   {
+    case IA32_TIME_STAMP_COUNTER:
+      writeMSR(msr, newvalue);
+      //while (1); //<--test
+      currentcpuinfo->lowestTSC=0;
+      globalTSC=newvalue;
+      currentcpuinfo->lastTSCTouch=newvalue;
+
+      lowestTSC=0;
+
+      break;
+
     case IA32_FEATURE_CONTROL_MSR:
       return raiseGeneralProtectionFault(0); //this msr is locked
+      break;
+
+    case IA32_TSC_ADJUST:
+      writeMSR(msr, newvalue);
+      globalTSC=_rdtsc();
+      currentcpuinfo->lasttsc=_rdtsc();
+      currentcpuinfo->lastTSCTouch=globalTSC;
+      currentcpuinfo->lowestTSC=0;
+      lowestTSC=0;
       break;
 
     case 0x174: //sysenter_CS
@@ -1619,11 +1728,14 @@ int handleWRMSR(pcpuinfo currentcpuinfo, VMRegisters *vmregisters)
 
 }
 
+int RDMSRcounter=0;
+
 int handleRDMSR(pcpuinfo currentcpuinfo, VMRegisters *vmregisters)
 {
 
 
   sendstring("emulating RDMSR\n\r");
+  RDMSRcounter++;
 
 
   unsigned long long result;
@@ -1633,16 +1745,19 @@ int handleRDMSR(pcpuinfo currentcpuinfo, VMRegisters *vmregisters)
 
   switch (msr)
   {
+    case IA32_TIME_STAMP_COUNTER:
+      return handle_rdtsc(currentcpuinfo, vmregisters); //handles the register setting and rip adjustment
 
-	case IA32_FEATURE_CONTROL_MSR:
-		result=readMSRSafe(currentcpuinfo, IA32_FEATURE_CONTROL_MSR);
-		result=result | FEATURE_CONTROL_LOCK; //set the LOCK bit (so the system thinks it can't be changed anymore)
 
-		result=result & ~(FEATURE_CONTROL_VMXON_SMX); //unset the VMX capability in SMX mode
+	  case IA32_FEATURE_CONTROL_MSR:
+	    result=readMSRSafe(IA32_FEATURE_CONTROL_MSR);
+	    result=result | FEATURE_CONTROL_LOCK; //set the LOCK bit (so the system thinks it can't be changed anymore)
 
-		if (emulatevmx==0)
-		  result=result & ~(FEATURE_CONTROL_VMXON); //unset the VMX capability
-	  break;
+	    result=result & ~(FEATURE_CONTROL_VMXON_SMX); //unset the VMX capability in SMX mode
+
+	    if (emulatevmx==0)
+	      result=result & ~(FEATURE_CONTROL_VMXON); //unset the VMX capability
+	    break;
 
     case 0x174: //sysenter_CS
       result=currentcpuinfo->sysenter_CS;
@@ -1694,6 +1809,15 @@ int handleRDMSR(pcpuinfo currentcpuinfo, VMRegisters *vmregisters)
       break;
     }
 
+    case IA32_RTIT_CTL_MSR:
+    {
+      sendstringf("Exit for IA32_RTIT_CTL_MSR\n");
+      result=readMSRSafe(IA32_RTIT_CTL_MSR);
+
+      result=result & 0x00000000ffffffffULL; //for now just keep it simple and keep it at 0, later when windows does a check if it can set the bit, return a shadow value accordingly
+      break;
+    }
+
     default:
       nosendchar[getAPICID()]=0;
       sendstring("MSR read event for msr that wasn\'t supposed to cause an exit!!!\n\r");
@@ -1712,11 +1836,14 @@ int handleRDMSR(pcpuinfo currentcpuinfo, VMRegisters *vmregisters)
 
 }
 
+
+criticalSection cpuidsourcesCS;
+
 int handleCPUID(VMRegisters *vmregisters)
 {
 //  sendstring("handling CPUID\n\r");
 
-  UINT64 oldeax=vmregisters->rax;
+  //UINT64 oldeax=vmregisters->rax;
   RFLAGS flags;
   flags.value=vmread(vm_guest_rflags);
 
@@ -1725,6 +1852,7 @@ int handleCPUID(VMRegisters *vmregisters)
 
   _cpuid(&(vmregisters->rax),&(vmregisters->rbx),&(vmregisters->rcx),&(vmregisters->rdx));
 
+  /*
   if (oldeax==1)
   {
     //remove the hypervisor active bit (bit 31 in ecx)
@@ -1732,7 +1860,7 @@ int handleCPUID(VMRegisters *vmregisters)
 
     if ((vmregisters->rcx & (1<<26)) && (vmread(vm_guest_cr4) & CR4_OSXSAVE)) //doe sit have OSXSave capabilities and is it enabled ?
       vmregisters->rcx=vmregisters->rcx | (1 << 27); //the guest has activated osxsave , represent that in cpuid
-  }
+  }*/
 
 
   /*
@@ -1794,7 +1922,18 @@ int handleCPUID(VMRegisters *vmregisters)
 
   }*/
 
+
+  //lower the TSC
+
+
+//  lockedQwordIncrement(&TSCOffset, cpuidTime);
+
+
+  //TSCOffset+=cpuidTime;
+
   vmwrite(vm_guest_rip,vmread(vm_guest_rip)+vmread(vm_exit_instructionlength));   //adjust eip to go after this instruction (we handled/emulated it)
+
+  getcpuinfo()->lastTSCTouch=_rdtsc();
   return 0;
 
 }
@@ -1939,8 +2078,12 @@ int setVM_CR0(pcpuinfo currentcpuinfo, UINT64 newcr0)
   UINT64 oldcr0=currentcpuinfo->guestCR0;//;vmread(0x6004); //fake cr0
   currentcpuinfo->guestCR0=newcr0;
 
+
   if (hasUnrestrictedSupport)
+  {
+    sendstring("setVM_CR0 in unrestricted mode\n");
     currentcpuinfo->efer=vmread(vm_guest_IA32_EFER);
+  }
 
   //hardcode ET (bit4) to 1
   newcr0=newcr0 | 0x10;
@@ -2005,6 +2148,10 @@ int setVM_CR0(pcpuinfo currentcpuinfo, UINT64 newcr0)
   {
     QWORD ActualFixed0=IA32_VMX_CR0_FIXED0&0xFFFFFFFF7FFFFFFEULL;  //PG and PE can be 0 in unrestricted guest mode
     vmwrite(vm_guest_cr0, newcr0 | ActualFixed0);
+
+    vpid_invalidate();
+    ept_invalidate();
+
 
     if ((vmread(vm_guest_cr0) & 0x80000001)==0x80000001)
     {
@@ -2101,6 +2248,7 @@ int setVM_CR0(pcpuinfo currentcpuinfo, UINT64 newcr0)
     {
       nosendchar[getAPICID()]=0;
       sendstringf("IF is not 0 when switching to protected mode\n\r");
+      ddDrawRectangle(0,DDVerticalResolution-100,100,100,0xff0000);
       while (1);
     }
 
@@ -2297,7 +2445,14 @@ int setVM_CR3(pcpuinfo currentcpuinfo, VMRegisters *vmregisters, UINT64 newcr3)
  * Called when the system changes the CR3 register
  */
 {
+  int shouldInvalidate=hasVPIDSupport;
   sendstringf("3:Setting CR3 (%6)\n\r", newcr3);
+
+
+  //This is likely a contextswitch. Update the lowestTSC to normal
+  currentcpuinfo->lowestTSC=_rdtsc(); //todo: apply speedhack speed
+  currentcpuinfo->lastTSCTouch=0;
+
 
   //Ultimap
   if (currentcpuinfo->Ultimap.Active)
@@ -2318,8 +2473,11 @@ instruction does not modify bit 63 of CR3, which is reserved and always 0.
   {
     sendstringf("CR4_PCIDE is enabled and CR3 bit 63 has been set\n");
     newcr3=newcr3&0x7FFFFFFFFFFFFFFFULL;
-    //Invalidate the TLB and caches
-    sendstringf("Invalidating caches\n");
+    //don't invalidate the TLB and caches
+
+    shouldInvalidate=0;
+
+    sendstringf("Skipping the cache invalidating\n");
   }
 
   //check if CR3 sets physical address bits it shouldn't, and if so, GPF, unless it's bit 63
@@ -2328,7 +2486,31 @@ instruction does not modify bit 63 of CR3, which is reserved and always 0.
     //has set bits beyond acceptable range, GPF
     sendstringf("Tried to set %6.  (Bits violating MAXPHYADDRMASK=%6)\n", newcr3, newcr3 & ~MAXPHYADDRMASK);
     raiseGeneralProtectionFault(3);
-    return 1;
+    return 0;
+  }
+
+  if (CR3ValueLog)
+  {
+    csEnter(&CR3ValueLogCS);
+    if ((CR3ValueLog) && (CR3ValuePos<512)) //512*8=4096
+    {
+      int i;
+      int found=0;
+      for (i=0; i<CR3ValuePos; i++)
+      {
+        if (CR3ValueLog[i]==newcr3)
+        {
+          found=1;
+          break;
+        }
+      }
+      if (found==0)
+      {
+        CR3ValueLog[CR3ValuePos]=newcr3;
+        CR3ValuePos++;
+      }
+    }
+    csLeave(&CR3ValueLogCS);
   }
 
   currentcpuinfo->guestCR3=newcr3;
@@ -2339,6 +2521,27 @@ instruction does not modify bit 63 of CR3, which is reserved and always 0.
   if (hasUnrestrictedSupport)
   {
     vmwrite(vm_guest_cr3,newcr3);
+    if (shouldInvalidate)
+    {
+      int type=3;
+  	  INVVPIDDESCRIPTOR desc;
+  	  desc.LinearAddress=0;
+  	  desc.zero=0;
+  	  desc.VPID=1;
+
+  	  if (has_VPID_INVVPIDSingleContextRetainingGlobals)
+        type=3;
+  	  else
+  		if (has_VPID_INVVPIDSingleContext)
+    	  type=2;
+    	else
+    	  type=1; //all
+
+      _invvpid(type, &desc);
+    }
+
+
+
     return 0;
   }
 
@@ -2382,6 +2585,17 @@ int setVM_CR4(pcpuinfo currentcpuinfo, UINT64 newcr4)
   {
     sendstringf("THE GUEST OS WANTS TO SET A BIT THAT SHOULD STAY 0\n\r");
     return 1;
+  }
+
+  if (hasVPIDSupport & (((newCR4 & (CR4_PGE))) != ((oldCR4 & (CR4_PGE)))))
+  {
+	  //invalidate tlb
+
+	  INVVPIDDESCRIPTOR desc;
+	  desc.LinearAddress=0;
+	  desc.zero=0;
+	  desc.VPID=1;
+	  _invvpid(1,&desc);
   }
 
   if (((newCR4 & (CR4_PCIDE))) && ((oldCR4 & (CR4_PCIDE))==0))
@@ -2511,7 +2725,7 @@ int handleCRaccess(pcpuinfo currentcpuinfo, VMRegisters *vmregisters)
   unsigned char general_purpose_register=(exit_qualification >> 8) & 0xf;
   unsigned char LMSW_sourcedata=(exit_qualification >> 16) & 0xFFFF;
 
-  sendstringf("Handling controll register access (CR_number=%d)\n\r",CR_number);
+  sendstringf("Handling control register access (CR_number=%d)\n\r",CR_number);
 
   switch (CR_number)
   {
@@ -2630,6 +2844,8 @@ int handleCRaccess(pcpuinfo currentcpuinfo, VMRegisters *vmregisters)
           {
             vmwrite(vm_guest_rip,vmread(vm_guest_rip)+vmread(vm_exit_instructionlength)); //adjust eip to go after this instruction (we handled/emulated it)
           }
+
+
 
 					return 0;
         }
@@ -3098,7 +3314,7 @@ int handleInterruptProtectedMode(pcpuinfo currentcpuinfo, VMRegisters *vmregiste
         nosendchar[getAPICID()]=0;
         sendstring("int 3\n");
 
-        vmwrite(vm_guest_rip,vmread(vm_guest_rip)+vmread(vm_exit_instructionlength)); //adjust this automatically
+        vmwrite(vm_guest_rip,vmread(vm_guest_rip)+vmread(vm_exit_instructionlength)); //adjust this automatically (probably 1)
 
         int r=emulateExceptionInterrupt(currentcpuinfo, vmregisters,
             int3redirection_idtbypass_cs, int3redirection_idtbypass_rip,
@@ -3118,7 +3334,6 @@ int handleInterruptProtectedMode(pcpuinfo currentcpuinfo, VMRegisters *vmregiste
         vmwrite(vm_guest_rip, vmread(vm_guest_rip)+vmread(vm_exit_instructionlength)); //set eip to the next instruction
         return 0;
       }
-
 
       setCR2(vmread(vm_exit_qualification));
 
@@ -3214,7 +3429,13 @@ int handleInterruptProtectedMode(pcpuinfo currentcpuinfo, VMRegisters *vmregiste
         sendvmstate(currentcpuinfo, vmregisters);
         displayPreviousStates();
         ShowCurrentInstructions(currentcpuinfo);
-        while (1) ;
+
+
+
+        while (1)
+        {
+          ddDrawRectangle(0,DDVerticalResolution-100,100,100,_rdtsc() & 0xffffff);
+        }
 
       }
 
@@ -3336,8 +3557,19 @@ int handleInterruptProtectedMode(pcpuinfo currentcpuinfo, VMRegisters *vmregiste
 
   sendstringf("newintinfo.valid=%d\n\r",newintinfo.valid);
 
-  vmwrite(0x4016, newintinfo.interruption_information); //entry info field
-  vmwrite(0x401a, vmread(vm_exit_instructionlength)); //entry instruction length
+  if (newintinfo.type!=5)
+  {
+    vmwrite(vm_entry_interruptioninfo, newintinfo.interruption_information); //entry info field
+    vmwrite(0x401a, vmread(vm_exit_instructionlength)); //entry instruction length
+  }
+  else
+  {
+    //int1
+    vmwrite(vm_pending_debug_exceptions, vmread(vm_pending_debug_exceptions) | (1<<14) );
+    vmwrite(vm_guest_rip,vmread(vm_guest_rip)+vmread(vm_exit_instructionlength));
+  }
+
+
 
   if (isFault)
   {
@@ -3352,7 +3584,23 @@ int handleInterruptProtectedMode(pcpuinfo currentcpuinfo, VMRegisters *vmregiste
   return 0;
 }
 
-int handleInterrupt(pcpuinfo currentcpuinfo, VMRegisters *vmregisters) //nightmare function. Needs rewrite
+BOOL handleSoftwareBreakpoint(pcpuinfo currentcpuinfo, VMRegisters *vmregisters, FXSAVE64 *fxsave)
+{
+  //handle software breakpoints
+  sendstringf("Software breakpoint\n");
+  if (hasEPTsupport)
+  {
+    if (ept_handleSoftwareBreakpoint(currentcpuinfo, vmregisters, fxsave))
+      return TRUE;
+  }
+
+  //perhaps future breakpoint handlers here
+
+  //still here
+  return FALSE; //unhandled
+}
+
+VMSTATUS handleInterrupt(pcpuinfo currentcpuinfo, VMRegisters *vmregisters, FXSAVE64 *fxsave) //nightmare function. Needs rewrite
 {
  // int origsc;
 
@@ -3360,12 +3608,19 @@ int handleInterrupt(pcpuinfo currentcpuinfo, VMRegisters *vmregisters) //nightma
   //UINT64 fakeCR4=vmread(0x6006);
 
   //ULONG interrorcode,idtvectorerrorcode;
-  //VMExit_interruption_information intinfo;
+  VMExit_interruption_information intinfo;
   //VMExit_idt_vector_information idtvectorinfo;
-  //VMEntry_interruption_information entry_intinfo;
+  //VMEntry_interruption_information enstry_intinfo;
   //int doublefault=0;
 
- // intinfo.interruption_information=vmread(vm_exit_interruptioninfo);
+  intinfo.interruption_information=vmread(vm_exit_interruptioninfo);
+
+  if ((intinfo.interruptvector==3) && (intinfo.type==itSoftwareException))
+  {
+    if (handleSoftwareBreakpoint(currentcpuinfo, vmregisters, fxsave))
+      return VM_OK;
+  }
+
  // interrorcode=vmread(vm_exit_interruptionerror);
   //idtvectorinfo.idtvector_info=vmread(vm_idtvector_information);
   //idtvectorerrorcode=vmread(0x440a);
@@ -3375,8 +3630,6 @@ int handleInterrupt(pcpuinfo currentcpuinfo, VMRegisters *vmregisters) //nightma
     return handleInterruptRealMode(currentcpuinfo, vmregisters);     //nope, so we're in real mode emulation
   else
     return handleInterruptProtectedMode(currentcpuinfo, vmregisters);
-
-  return 1;
 }
 
 
@@ -3435,15 +3688,151 @@ InterruptFired:
 }
 
 
+int handleSingleStep(pcpuinfo currentcpuinfo)
+{
+  //handle the reasons one by one
+  sendstringf("handleSingleStep.  currentcpuinfo->singleStepping.ReasonsPos=%d\n", currentcpuinfo->singleStepping.ReasonsPos);
+
+  while (currentcpuinfo->singleStepping.ReasonsPos)
+  {
+    int i=currentcpuinfo->singleStepping.ReasonsPos-1;
+    int r;
+    sendstringf("  ID %d Reason %d\n",i, currentcpuinfo->singleStepping.Reasons[i].Reason);
+
+    switch (currentcpuinfo->singleStepping.Reasons[i].Reason)
+    {
+      case 1: r=ept_handleWatchEventAfterStep(currentcpuinfo, currentcpuinfo->singleStepping.Reasons[i].ID); break;
+      case 2: r=ept_handleCloakEventAfterStep(currentcpuinfo, (PCloakedPageData)currentcpuinfo->singleStepping.Reasons[i].Data); break;
+      case 3: r=ept_handleSoftwareBreakpointAfterStep(currentcpuinfo, currentcpuinfo->singleStepping.Reasons[i].ID); break;
+    }
+
+    if (r)
+    {
+      ddDrawRectangle(0,DDVerticalResolution-100,100,100,0xff0000);
+      while (1);
+    }
+
+    currentcpuinfo->singleStepping.ReasonsPos--;
+  }
+
+  vmx_disableSingleStepMode();
+
+  sendstringf("return from handleSingleStep.  currentcpuinfo->singleStepping.ReasonsPos=%d\n", currentcpuinfo->singleStepping.ReasonsPos);
+
+  return 0;
+}
+
+void speedhack_setspeed(double speed)
+{
+  QWORD currentTime=_rdtsc();
+
+  QWORD initialoffset=(currentTime-speedhackInitialTime)*speedhackSpeed+speedhackInitialOffset;
+  speedhackInitialTime=currentTime;
+
+  if (initialoffset<lowestTSC)
+    initialoffset=lowestTSC+1000;
+
+  lowestTSC=initialoffset;
+  speedhackInitialOffset=initialoffset;
+  speedhackSpeed=speed;
+
+  useSpeedhack=1; //once used it's always on
+}
+
+
+int handle_rdtsc(pcpuinfo currentcpuinfo, VMRegisters *vmregisters)
+{
+  QWORD t;
+  double s;
+  QWORD lTSC=lowestTSC;
+  QWORD realtime;
+
+
+  if (lTSC<currentcpuinfo->lowestTSC)
+    lTSC=currentcpuinfo->lowestTSC;
+
+
+  realtime=_rdtsc();
+  //csEnter(&TSCCS);
+
+
+  if (currentcpuinfo->lowestTSC==0)
+    currentcpuinfo->lowestTSC=realtime;
+
+
+
+  //speedhack:
+  if (useSpeedhack) //(useSpeedhack)
+  {
+    t=(realtime-speedhackInitialTime)*speedhackSpeed+speedhackInitialOffset;
+   // t=globalTSC+s;
+  }
+  else
+    t=realtime; //speedhack disabled ATM globalTSC+s;
+
+  if (lTSC==0)
+    lTSC=t;
+
+  if (t<lTSC)
+  {
+    lTSC=t; //overflow happened... (bp here)
+
+  }
+
+
+  if (adjustTimestampCounters)
+  {
+    if ((realtime-currentcpuinfo->lastTSCTouch)<(QWORD)adjustTimestampCounterTimeout) //todo: and not a forbidden RIP
+    {
+
+      int off=20+(realtime & 0xf);
+
+
+      t=currentcpuinfo->lowestTSC+off;
+      //t=lTSC+off;
+
+      //writeMSR(0x838, readMSR(0x838));
+
+      //lockedQwordIncrement(&lowestTSC,off);
+      currentcpuinfo->lowestTSC=t;
+
+    }
+    else
+    {
+      if (lowestTSC<t)
+        lowestTSC=t;
+      currentcpuinfo->lowestTSC=t;
+    }
+  }
+
+  vmregisters->rax=t & 0xffffffff;
+  vmregisters->rdx=t >> 32;
+
+  if (lowestTSC<t)
+    lowestTSC=t;
+
+
+
+
+  vmwrite(vm_guest_rip,vmread(vm_guest_rip)+vmread(vm_exit_instructionlength));
+
+  RFLAGS flags;
+  flags.value=vmread(vm_guest_rflags);
+
+  if (flags.TF==1)
+    vmwrite(vm_pending_debug_exceptions,0x4000);
+
+  return 0;
+}
+
+
 #pragma GCC pop_options
 
 
-int handleVMEvent(pcpuinfo currentcpuinfo, VMRegisters *vmregisters)
+int handleVMEvent(pcpuinfo currentcpuinfo, VMRegisters *vmregisters, FXSAVE64 *fxsave)
 {
   int result;
   int exit_reason=currentcpuinfo->guest_error?currentcpuinfo->guest_error:vmread(vm_exit_reason) & 0x7fffffff;
-
-
 
   if (currentcpuinfo->vmxdata.runningvmx)
   {
@@ -3451,13 +3840,30 @@ int handleVMEvent(pcpuinfo currentcpuinfo, VMRegisters *vmregisters)
     return handleByGuest(currentcpuinfo, vmregisters);
   }
 
+#ifdef STATISTICS
+  if (exit_reason<=55)
+    currentcpuinfo->eventcounter[exit_reason]++;
+#endif
+
+  if (currentcpuinfo->eptUpdated==1)
+  {
+	  currentcpuinfo->eptUpdated=0;
+	  ept_invalidate();
+  }
+
+  /*
+  vpid_invalidate(); //test
+  ept_invalidate(); //test
+  */
+
+
   switch (exit_reason) //exit reason
   {
     case 0: //interrupt
     {
       int result;
 
-      result=handleInterrupt(currentcpuinfo, vmregisters);
+      result=handleInterrupt(currentcpuinfo, vmregisters, fxsave);
 
       return result;
     }
@@ -3468,7 +3874,7 @@ int handleVMEvent(pcpuinfo currentcpuinfo, VMRegisters *vmregisters)
       sendstring("received external interrupt\n\r");
       if (vmread(0x4826)==1)
       {
-        sendstring("In HLT mode so become active and disable externel event watching\n\r");
+        sendstring("In HLT mode so become active and disable external event watching\n\r");
         vmwrite(vm_execution_controls_pin,vmread(0x4000) & 0xFFFFFFFE); //disable external event watching
 
 
@@ -3496,13 +3902,16 @@ int handleVMEvent(pcpuinfo currentcpuinfo, VMRegisters *vmregisters)
 
 		case 2: //tripple fault
 		{
+		  ddDrawRectangle(0,DDVerticalResolution-100,100,100,0xff0000);
 			sendstring("A TRIPPLE FAULT HAPPENED. NORMALLY THE SYSTEM WOULD REBOOT NOW\n\r");
 			return 1;
 		}
 
 		case 3: //INIT SIGNAL
 		{
-			sendstring("Received a INIT signal\n\r"); //should enter wait-for-sipi mode
+		  //enter wait-for-sipi mode
+			sendstring("Received an INIT signal\n\r"); //should enter wait-for-sipi mode
+			handleINIT(currentcpuinfo, vmregisters);
 			return 0; //ignore?
 		}
 
@@ -3529,19 +3938,43 @@ int handleVMEvent(pcpuinfo currentcpuinfo, VMRegisters *vmregisters)
 
 		case 7: //interrupt window
 		{
-			sendstring("Interrupt window event... I did NOT ask for this\n\r");
-			sendstringf("vm_execution_controls_cpu=%6\n", vmread(vm_execution_controls_cpu));
+		  if ((currentcpuinfo->singleStepping.ReasonsPos) && (currentcpuinfo->singleStepping.Method==2))
+		  {
+        sendstring("Interrupt window event... And I am in single stepping mode\n");
+
+        return handleSingleStep(currentcpuinfo);
+		  }
+		  else
+		  {
+		    sendstring("Interrupt window event... I did NOT ask for this\n\r");
+		    sendstringf("vm_execution_controls_cpu=%6\n", vmread(vm_execution_controls_cpu));
+
+#ifndef DEBUG
+		    ddDrawRectangle(0,DDVerticalResolution-100,100,100,0xff0000);
+		     while (1);
+#endif
+		  }
 			return 0; //ignore for now
 		}
 
 		case 8: //NMI window
 		{
 		  sendstring("NMI Window");
-		  return 1;
+		  if (currentcpuinfo->NMIOccured)
+		    raiseNMI();
+
+
+		  vmx_disableNMIWindowExiting(); //vmwrite(vm_guest_interruptability_state,2); for some single stepping fun
+
+		  return 0;
 		}
 
     case 9:
+    {
+      ddDrawRectangle(0,DDVerticalResolution-100,100,100,0xff0000);
+      while (1);
       return handleTaskswitch(currentcpuinfo, vmregisters);
+    }
 
 		case 10: //CPUID
     {
@@ -3553,6 +3986,9 @@ int handleVMEvent(pcpuinfo currentcpuinfo, VMRegisters *vmregisters)
 		case 11:
 		{
 		  //currently not supported
+      ddDrawRectangle(0,DDVerticalResolution-100,100,100,0xff0000);
+      //while (1);
+
 		  sendstring("GETSEC\n\r");
 		  raiseInvalidOpcodeException(currentcpuinfo);
 		  return 0;
@@ -3600,8 +4036,15 @@ int handleVMEvent(pcpuinfo currentcpuinfo, VMRegisters *vmregisters)
 
 		case 16: //RDTSC
 		{
-			sendstring("RDTSC called\n\r");
-			return 1;
+		  //TSCOffset+=rdtscTime;
+		  //lockedQwordIncrement(&TSCOffset, rdtscTime);
+		  int r;
+
+
+
+		  r=handle_rdtsc(currentcpuinfo, vmregisters);
+		  currentcpuinfo->lastTSCTouch=_rdtsc();
+		  return r;
 		}
 
 		case 17: //RSM
@@ -3615,12 +4058,11 @@ int handleVMEvent(pcpuinfo currentcpuinfo, VMRegisters *vmregisters)
     {
 
       nosendchar[getAPICID()]=0;
-      sendstring("vmcall\n");
+      //sendstring("vmcall\n");
 
       result = handleVMCall(currentcpuinfo, vmregisters);
 
-
-      sendstringf("Returned from handleVMCall, result=%d\n\r",result);
+      //sendstringf("Returned from handleVMCall, result=%d\n\r",result);
       return result;
     }
 
@@ -3628,6 +4070,11 @@ int handleVMEvent(pcpuinfo currentcpuinfo, VMRegisters *vmregisters)
     case 0xce00: //special exit reasons (vmresume/vmlaunch failures)
     case 0xce01:
 		{
+		  ddDrawRectangle(0,DDVerticalResolution-100,100,100,0xff0000);
+		  //while (1);
+
+		  //jtagbp
+
 			sendstring("VMX instruction called...\n\r");
 			return handleIntelVMXInstruction(currentcpuinfo, vmregisters);
 			//return raiseInvalidOpcodeException(currentcpuinfo);
@@ -3677,6 +4124,7 @@ int handleVMEvent(pcpuinfo currentcpuinfo, VMRegisters *vmregisters)
 
   case 33: //inv. guest
     {
+      ddDrawRectangle(0,DDVerticalResolution-100,100,100,0xff0000);
       sendstringf("VM-Entry failure due to invalid guest\n\r");
       result=handleInvalidEntryState(currentcpuinfo, vmregisters);
 
@@ -3703,10 +4151,21 @@ int handleVMEvent(pcpuinfo currentcpuinfo, VMRegisters *vmregisters)
 			return 1;
 		}
 
-		case 37:
+
+		case vm_exit_monitor_trap_flag:
 		{
-		  sendstring("Monitor trap flag\n\r");
-		  return 1;
+			if ((currentcpuinfo->singleStepping.ReasonsPos) && (currentcpuinfo->singleStepping.Method==1))
+				return handleSingleStep(currentcpuinfo);
+
+			sendstring("(Un)expected monitor trap flag\n\r");
+#ifndef DEBUG
+			ddDrawRectangle(0,DDVerticalResolution-100,100,100,0xff0000);
+			while (1) ;
+#else
+			return 0;
+#endif
+
+
 		}
 
 		case 39: //MONITOR
@@ -3758,8 +4217,22 @@ int handleVMEvent(pcpuinfo currentcpuinfo, VMRegisters *vmregisters)
 		}
 
 		case 48:
-		  sendstring("EPT violation\n\r");
-		  return handleEPTViolation(currentcpuinfo, vmregisters);
+		{
+
+			int r;
+
+			outportb(0x80,48);
+		    sendstring("EPT violation\n\r");
+		    r=handleEPTViolation(currentcpuinfo, vmregisters, (PFXSAVE64)fxsave);
+
+		    ept_invalidate();
+		    if (r==0)
+		      outportb(0x80,48*2);
+			else
+			  outportb(0x80,48*2+1);
+
+		    return r;
+		}
 
 		case 49:
 		{
@@ -3770,30 +4243,71 @@ int handleVMEvent(pcpuinfo currentcpuinfo, VMRegisters *vmregisters)
 		case 50:
 		{
 		  sendstring("INVEPT\n\r");
-		  return 1;
+		  return handleIntelVMXInstruction(currentcpuinfo, vmregisters);
+
+		  //return 1;
 		}
 
 		case 51:
 		{
-		  sendstring("RDTSCP\n\r");
-		  return 1;
+		  QWORD t;
+		  //RDTSCP
+		  //TSCOffset+=rdtscpTime;
+		  //lockedQwordIncrement(&TSCOffset, rdtscpTime);
+
+		  //if (currentcpuinfo->cpunr!=0)
+		  //todo: Calibrate at start to find the system rdtscp calls and don't touch those
+
+		  //IS
+		  //  currentcpuinfo->lastTSCTouch=_rdtsc();
+
+		 // t=_rdtsc();
+		 // currentcpuinfo->lowestTSC=t;
+		 // lowestTSC=t;
+
+		  //vmregisters->rax=t & 0xffffffff;
+		  //vmregisters->rdx=t >> 32;
+
+
+		  int r=handle_rdtsc(currentcpuinfo, vmregisters);
+		  currentcpuinfo->lastTSCTouch=_rdtsc();
+
+		  vmregisters->rcx=readMSR(IA32_TSC_AUX_MSR);
+		  return r;
 		}
 
 		case vm_exit_vmx_preemptiontimer_reachedzero:
 		{
-		  IA32_VMX_MISC.IA32_VMX_MISC=readMSR(0x485);
+		  //IA32_VMX_MISC.IA32_VMX_MISC=readMSR(0x485);
+
 
 		  nosendchar[getAPICID()]=0;
 		  //sendstringf("%d: %x:%6 (vmm rsp=%6 , freemem=%x)\n", currentcpuinfo->cpunr, vmread(vm_guest_cs),vmread(vm_guest_rip), getRSP(), maxAllocatableMemory());
-		  vmwrite(vm_preemption_timer_value,IA32_VMX_MISC.vmx_premption_timer_tsc_relation*10000000);
+
+		  vmwrite(vm_preemption_timer_value,10000);
+
+		  ddDrawRectangle(0,0,100,100,_rdtsc());
 		  return 0;
 		}
 
-		case 53:
+		case vm_exit_invvpid:
 		{
 		  sendstring("INVVPID\n\r");
-		  return 1;
+		  return handleIntelVMXInstruction(currentcpuinfo, vmregisters);
+
+#ifdef DEBUG
+		  ddDrawRectangle(0,DDVerticalResolution-100,100,100,0xff0000);
+		  while (1);
+#endif
+		 // return 1;
 		}
+
+    case vm_exit_invpcid:
+    {
+      ddDrawRectangle(0,DDVerticalResolution-100,100,100,0xff0000);
+      while(1);
+      return 1;
+    }
 
 		case 54:
 		{

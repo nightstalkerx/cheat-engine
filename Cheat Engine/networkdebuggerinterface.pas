@@ -5,8 +5,12 @@ unit NetworkDebuggerInterface;
 interface
 
 uses
-  jwawindows, windows, Classes, SysUtils,cefuncproc, newkernelhandler,
-  DebuggerInterface, networkInterface, networkInterfaceApi, contnrs;
+
+  {$ifdef windows}
+  jwawindows, windows,
+  {$endif}
+  Classes, SysUtils,cefuncproc, newkernelhandler,
+  DebuggerInterface, networkInterface, networkInterfaceApi, contnrs{$ifdef darwin},macport, macportdefines{$endif};
 
 type
   TNetworkDebuggerInterface=class(TDebuggerInterface)
@@ -38,7 +42,7 @@ type
 
 implementation
 
-uses debuggertypedefinitions, processhandlerunit;
+uses debuggertypedefinitions, ProcessHandlerUnit;
 
 type
   TNetworkX86_32Context=packed record
@@ -263,7 +267,7 @@ begin
     end; //else use GetThreadContext
 
     if (carm<>nil) then
-      freemem(carm);
+      FreeMemAndNil(carm);
   end;
 end;
 
@@ -350,7 +354,7 @@ begin
     end; //you should use GetThreadContextArm
 
     if c32<>nil then
-      freemem(c32);
+      FreeMemAndNil(c32);
   end;
 
   result:=lpContext.{$ifdef cpu64}rip{$else}eip{$endif}<>0;

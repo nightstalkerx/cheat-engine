@@ -5,7 +5,13 @@ unit HotKeys;
 interface
 
 uses
-  windows, LCLIntf, Messages, SysUtils, Classes, Graphics, Controls, Forms,
+  {$ifdef darwin}
+  macport, LCLType, math,
+  {$endif}
+  {$ifdef windows}
+  windows,
+  {$endif}
+  LCLIntf, Messages, SysUtils, Classes, Graphics, Controls, Forms,
   Dialogs, StdCtrls, Buttons, registry, CEFuncProc, ExtCtrls, LResources,
   comCtrls, menus, hotkeyhandler, MemoryRecordUnit, commonTypeDefs, strutils;
 
@@ -30,6 +36,7 @@ type
     edtDescription: TEdit;
     edtFreezeValue: TEdit;
     edtHotkey: TEdit;
+    schImageList: TImageList;
     Label1: TLabel;
     Label2: TLabel;
     lblActivateSound: TLabel;
@@ -94,7 +101,7 @@ type
 
 implementation
 
-uses MainUnit, trainergenerator, luafile, LuaHandler, DPIHelper;
+uses MainUnit, {$ifdef windows}trainergenerator,{$endif} luafile, LuaHandler, DPIHelper;
 
 resourcestring
   rsHotkeyID = 'Hotkey ID=%s';
@@ -111,7 +118,7 @@ resourcestring
   rsIncreaseValueWith = 'Increase value with:';
   rsSpeakText = 'Speak Text';
 
-  rsTextToSpeechHint = 'The text to speak'#13#10'%s = The description field of the memory record'#13#10'%s = The description of the hotkey';
+  rsTextToSpeechHint = 'The text to speak'#13#10'{Description} = The description of the hotkey'#13#10'{MRDescription} = The description field of the memory record'#13#10'{MRValue} = The value of the memory record';
   rsDefaultActivated = '%s Activated';
   rsDefaultDeactivated = '%s Deactivated';
 
@@ -156,6 +163,7 @@ begin
   Increase value with:
 
   }
+  result:='';
   if memrec.VarType=vtAutoAssembler then
   begin
     case a of
@@ -497,11 +505,14 @@ end;
 
 procedure THotKeyForm.FormCreate(Sender: TObject);
 begin
-  edtActivateText.Hint:=format(rsTextToSpeechHint, ['{MRDescription}','{Description}']); //make it easier for translators
+  edtActivateText.Hint:=rsTextToSpeechHint; //make it easier for translators
   edtDeactivateText.Hint:=edtActivateText.Hint;
 
   edtActivateText.Text:=format(rsDefaultActivated, ['{MRDescription}']);
   edtDeactivateText.Text:=format(rsDefaultDeactivated, ['{MRDescription}']);
+
+  edtActivateText.ShowHint:=true;
+  edtDeactivateText.ShowHint:=true;
 
 
   pagecontrol1.ActivePage:=tabsheet1;
@@ -529,18 +540,28 @@ begin
   cbActivateSound.Items.add('');
   cbDeactivateSound.Items.add('');
 
+  {$ifdef windows}
   FillSoundList(cbActivateSound.Items);
   FillSoundList(cbDeactivateSound.Items);
 
+
   cbActivateSound.Items.Add(rsSpeakText);
   cbDeactivateSound.Items.Add(rsSpeakText);
+  {$else}
+  cbActivateSound.Enabled:=false;
+  cbDeactivateSound.Enabled:=false;
+  sbPlayActivate.enabled:=false;
+  sbPlayDeactivate.enabled:=false;
+  {$endif}
 end;
 
 procedure THotKeyForm.FormShow(Sender: TObject);
 var
   i, maxwidth: integer;
   s: string;
+  {$ifdef windows}
   cbi: TComboboxInfo;
+  {$endif}
 begin
   PageControl1.PageIndex:=1;
 
@@ -561,6 +582,7 @@ begin
     maxwidth:=max(maxwidth, Canvas.TextWidth(s));
   end;
 
+  {$ifdef windows}
   cbi.cbSize:=sizeof(cbi);
   if GetComboBoxInfo(cbFreezedirection.Handle, @cbi) then
   begin
@@ -569,6 +591,7 @@ begin
     cbFreezedirection.width:=cbFreezedirection.width+i;
   end
   else
+  {$endif}
     cbFreezedirection.width:=maxwidth+16;
 
   maxwidth:=0;
@@ -581,6 +604,7 @@ begin
   maxwidth:=max(maxwidth, canvas.TextWidth(edtActivateText.Text));
 
 
+  {$ifdef windows}
   cbi.cbSize:=sizeof(cbi);
   if GetComboBoxInfo(cbActivateSound.Handle, @cbi) then
   begin
@@ -589,6 +613,7 @@ begin
     cbActivateSound.width:=cbActivateSound.width+i;
   end
   else
+  {$endif}
     cbActivateSound.width:=maxwidth+16;
 
   if cbFreezedirection.width>edtHotkey.Width then
@@ -666,8 +691,10 @@ begin
     oldactivate:=cbActivateSound.text;
     olddeactivate:=cbDeactivateSound.Text;
 
+    {$ifdef windows}
     FillSoundList(cbActivateSound.Items);
     FillSoundList(cbDeactivateSound.Items);
+    {$endif}
 
     cbActivateSound.Items.Add(rsSpeakText);
     cbDeactivateSound.Items.Add(rsSpeakText);

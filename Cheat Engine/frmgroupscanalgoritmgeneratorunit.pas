@@ -5,7 +5,13 @@ unit frmgroupscanalgoritmgeneratorunit;
 interface
 
 uses
-  windows, Classes, SysUtils, FileUtil, Forms, Controls, Graphics, Dialogs, StdCtrls,
+  {$ifdef darwin}
+  macport,
+  {$endif}
+  {$ifdef windows}
+  windows,
+  {$endif}
+  Classes, SysUtils, FileUtil, Forms, Controls, Graphics, Dialogs, StdCtrls,
   ExtCtrls, CustomTypeHandler, math, strutils, cefuncproc, groupscancommandparser,
   vartypestrings, commonTypeDefs;
 
@@ -61,7 +67,7 @@ type
     function getParameterPart(skipPicked: boolean=true): string;
     function bytesize: integer;
     procedure setPosition;
-    constructor Create(frm: TfrmGroupScanAlgoritmGenerator);
+    constructor Create(frm: TfrmGroupScanAlgoritmGenerator);  overload;
     destructor destroy; override;
   end;
 
@@ -204,7 +210,9 @@ var
   i: integer;
   maxwidth: integer;
 
+  {$ifdef windows}
   cbi: TComboboxInfo;
+  {$endif}
 begin
   inherited create(frm);
   AutoSize:=false;
@@ -314,6 +322,7 @@ begin
   edtValue.visible:=false;
 
 
+  {$ifdef windows}
   cbi.cbSize:=sizeof(cbi);
   if GetComboBoxInfo(cbVartype.Handle, @cbi) then
   begin
@@ -321,7 +330,9 @@ begin
 
     cbvartype.width:=cbvartype.width+i;
   end;
+  {$endif}
 
+  edtValue.Constraints.MinWidth:=frm.Canvas.TextWidth('XXXXXXXXXXX');
 
   setPosition;
 end;
@@ -420,9 +431,21 @@ begin
   btnok.width:=i;
   btncancel.width:=i;
 
-  i:=(TVariableInfo(varinfolist[0]).cbVartype.Height+5)-scrollbox1.ClientHeight;
+  i:=(TVariableInfo(varinfolist[0]).cbVartype.Height*3+5)-scrollbox1.ClientHeight;
   if i>0 then
     height:=height+i+15;
+
+  //width:=canvas.
+
+  if Varinfolist.count>0 then //should be true
+  begin
+    i:=TVariableInfo(Varinfolist[0]).cbVartype.width*3;
+    width:=i;
+//    TVariableInfo(Varinfolist[0]).cbPicked.left+TVariableInfo(Varinfolist[0]).cbPicked.width
+  end;
+
+  position:=poDesigned;
+  position:=poScreenCenter;
 
 end;
 
@@ -567,7 +590,11 @@ begin
     for i:=0 to varinfolist.count-1 do
     begin
       vi:=TVariableInfo(varinfolist[i]);
-      if (vi.cbVartype.itemindex in [-1,0]=false) and (vi.cbPicked.checked=false) then allpicked:=false;
+
+      if (not ((vi.cbVartype.itemindex = 0) or (vi.cbVartype.itemindex = -1))) and (vi.cbPicked.checked=false) then
+        allpicked:=false;
+
+//      if (vi.cbVartype.itemindex in [-1,0]=false) and (vi.cbPicked.checked=false) then allpicked:=false;
     end;
 
     for i:=0 to Varinfolist.count-1 do

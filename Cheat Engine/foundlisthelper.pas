@@ -7,17 +7,20 @@ unit foundlisthelper;
 
 interface
 
-{$ifdef windows}
-uses LCLIntf,sysutils,classes,ComCtrls,StdCtrls,symbolhandler, CEFuncProc,
-     NewKernelHandler, memscan, CustomTypeHandler, byteinterpreter,
-     groupscancommandparser, math, AvgLvlTree, commonTypeDefs, parsers;
-{$endif}
 
-{$ifdef unix}
+
+
+{$ifdef jni}
 //in cecore the foundlisthelper is data only. No link to a listview
 uses sysutils,classes, symbolhandler, ProcessHandlerUnit, NewKernelHandler, memscan,
      byteinterpreter, CustomTypeHandler, groupscancommandparser, math, AvgLvlTree,
      commonTypeDefs, parsers, unixporthelper;
+{$else}
+uses {$ifdef darwin}macport,{$endif}
+     sysutils,classes,ComCtrls,StdCtrls, symbolhandlerstructs,
+     NewKernelHandler, memscan, CustomTypeHandler, byteinterpreter,
+     groupscancommandparser, math, AvgLvlTree, commonTypeDefs, parsers;
+
 {$endif}
 
 type TScanType=(fs_advanced,fs_addresslist);
@@ -117,8 +120,8 @@ type Tscandisplayroutine=procedure(value: pointer; output: pchar);
 
 implementation
 
-{$ifdef windows}
-uses mainunit, processhandlerunit;
+{$ifndef jni}
+uses CEFuncProc, LCLIntf, mainunit, processhandlerunit, symbolhandler;
 {$endif}
 
 
@@ -295,8 +298,8 @@ begin
     freeandnil(memoryfile);
     freeandnil(outaddress);
     freeandnil(outmemory);
-    freemem(buf);
-    buf:=nil;
+    freememandnil(buf);
+
   end;
 
   //still here, not crashed, so out with the old, in with the new...
@@ -386,6 +389,7 @@ var i,j: integer;
     x: dword;
     temp: string;
 begin
+  setlength(oldvalues,0);
 
   if addressfile=nil then exit;
 
@@ -582,26 +586,31 @@ var j,k,l: integer;
 
     groupdata: PGroupAddress;
 begin
-  if i=qword(-1) then exit;
-
-
-
   extra:=0;
   value:='';
   result:=0;
   groupdata:=nil;
 
+  if i=qword(-1) then exit;
+
+
+
+
+
+
   currentaddress:=GetAddressOnly(i,extra, @groupdata);
 
   result:=currentaddress;
   j:=i-addresslistfirst;
+  if j<0 then exit(0);
+
 
   if valuelist[j]='' then
   begin
     if vartype=vtAll then
     begin
       //override vtype with the type it scanned
-      {$ifndef unix}
+      {$ifndef jni}
       if extra >=$1000 then
       begin
         fcustomtype:=tcustomtype(customTypes[extra-$1000]);
@@ -774,7 +783,7 @@ begin
           groupElementSize:=sizeof(ptruint)+sizeof(dword)*length(gcp.elements);
 
           if addresslistg<>nil then
-            freemem(addresslistg);
+            freememandnil(addresslistg);
 
           addresslistg:=getmem(1024*groupElementSize);
 
@@ -901,7 +910,7 @@ begin
     foundlist.free;
 
   if addresslistg<>nil then
-    freemem(addresslistg);
+    freememandnil(addresslistg);
 end;
 
 constructor TFoundlist.create(foundlist: tlistview; memscan: TMemScan; listname: string='');

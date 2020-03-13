@@ -5,6 +5,7 @@ unit feces;
 
 interface
 
+{$ifdef windows}
 uses
   Classes, SysUtils, bcrypt, DOM, xmlutils, XmlRead, XMLWrite, dialogs, windows,
   graphics, math;
@@ -14,7 +15,11 @@ procedure signTable(cheattable: TDOMElement);
 procedure signTableFile(f: string);
 function isProperlySigned(cheattable: TDOMElement; out specialstring: string; out imagepos: integer; out image: tpicture): boolean;
 
+{$endif}
+
 implementation
+
+{$ifdef windows}
 
 uses cefuncproc, CustomBase85, registry, formsettingsunit;
 
@@ -92,7 +97,7 @@ end;
 
 function DecodePointerNI(p: pointer):pointer; stdcall;
 begin
-  if rv=0 then exit;
+  if rv=0 then exit(p);
 
   result:=pointer(ptruint(p) xor rv);
 end;
@@ -165,6 +170,8 @@ var
   imagebuf: pointer;
   imagestream: TMemorystream;
 begin
+  image:=nil;
+
   if not initialize_bCrypt then
     exit(false);
 
@@ -250,7 +257,7 @@ begin
 
         finally
           imagestream.free;
-          freemem(imagebuf);
+          FreeMemAndNil(imagebuf);
         end;
       end;
     end;
@@ -299,7 +306,7 @@ begin
 
     BCryptDestroyHash(hHash);
     hHash:=0;
-    freemem(hashbuffer);
+    FreeMemAndNil(hashbuffer);
     hashbuffer:=nil;
 
     //now hash the table(without signature section) and verify that with the 'SignedHash'
@@ -334,10 +341,10 @@ begin
 
   finally
     if tablesignature<>nil then
-      freemem(tablesignature);
+      FreeMemAndNil(tablesignature);
 
     if publickeyblock<>nil then
-      freemem(publickeyblock);
+      FreeMemAndNil(publickeyblock);
 
     if publicdata<>nil then
       freeandnil(publicdata);
@@ -355,7 +362,7 @@ begin
       freeandnil(cheattablecontents);
 
     if hashbuffer<>nil then
-      freemem(hashbuffer);
+      FreeMemAndNil(hashbuffer);
 
 
     if tablepublickey<>0 then
@@ -438,7 +445,7 @@ begin
         end;
         BCryptDestroyHash(hashAlgoritm);
       end;
-      freemem(bHashObject);
+      FreeMemAndNil(bHashObject);
       BCryptCloseAlgorithmProvider(hashAlgoritm,0);
     end;
   end;
@@ -478,11 +485,11 @@ begin
   end;
 
   generateHash(initialhash,initialhashsize,partialhash,partialhashsize);
-  freemem(initialhash);
+  FreeMemAndNil(initialhash);
 
   copysize:=ifthen(partialhashsize>wantedsize, wantedsize, partialhashsize);
   copymemory(@hash[0],partialhash, copysize);
-  freemem(partialhash);
+  FreeMemAndNil(partialhash);
 
   inc(hashpos, copysize);
 
@@ -492,7 +499,7 @@ begin
 
     copysize:=ifthen(partialhashsize+hashpos>wantedsize, wantedsize-hashpos, partialhashsize);
     copymemory(@hash[hashpos],partialhash, copysize);
-    freemem(partialhash);
+    FreeMemAndNil(partialhash);
     inc(hashpos,copysize);
   end;
 
@@ -597,7 +604,7 @@ begin
       begin
         if passwordhash<>nil then
         begin
-          freemem(decodepointer(passwordhash));
+          FreeMem(decodepointer(passwordhash));
           passwordhash:=nil;
         end;
 
@@ -697,8 +704,8 @@ begin
 
       signedhash.TextContent:=tempstr;
       TDOMElement(signedhash).SetAttribute('HashSize',IntToStr(signsize2));
-      freemem(tempstr);
-      tempstr:=nil;
+      FreeMemAndNil(tempstr);
+
 
       //and add the public key to the table as well
       publickey:=Signature.AppendChild(doc.CreateElement('PublicKey'));
@@ -707,8 +714,8 @@ begin
       publickey.TextContent:=tempstr;
       TDOMElement(publickey).SetAttribute('Size',IntToStr(publicdata.Size));
 
-      freemem(tempstr);
-      tempstr:=nil;
+      FreeMemAndNil(tempstr);
+
 
       if pwhash<>nil then
       begin
@@ -718,7 +725,7 @@ begin
           passwordhashlength:=pwhashlength;
         end
         else
-          freemem(pwhash);
+          FreeMemAndNil(pwhash);
       end;
     except
       on e:exception do
@@ -744,13 +751,13 @@ begin
       freeandnil(cheattablecontents);
 
     if bhashobject<>nil then
-      freemem(bHashObject);
+      FreeMemAndNil(bHashObject);
 
     if hashbuffer<>nil then
-      freemem(hashbuffer);
+      FreeMemAndNil(hashbuffer);
 
     if signedbuffer<>nil then
-      freemem(signedbuffer);
+      FreeMemAndNil(signedbuffer);
 
     if tempstr<>nil then
       freeandnil(tempstr);
@@ -770,6 +777,8 @@ initialization
 
   if not assigned(decodepointer) then
     (decodepointer):=@DecodePointerNI;
+
+{$endif}
 
 end.
 

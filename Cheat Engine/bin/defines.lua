@@ -138,8 +138,10 @@ vtSingle=4
 vtDouble=5
 vtString=6
 vtUnicodeString=7 --Only used by autoguess
+vtWideString=7
 vtByteArray=8
 vtBinary=9
+vtAll=10
 vtAutoAssembler=11
 vtPointer=12 --Only used by autoguess and structures
 vtCustom=13
@@ -344,6 +346,7 @@ GW_HWNDLAST = 1
 GW_HWNDNEXT = 2
 GW_HWNDPREV = 3
 GW_HWNDOWNER = 4
+GW_OWNER = 4
 GW_CHILD = 5;
 GW_ENABLEDPOPUP = 6;
 
@@ -404,3 +407,15 @@ drBounds=0
 drIcon=1
 drLabel=2
 drSelectBounds=3
+
+fmCreate        = 0xff00
+fmOpenRead      = 0x0000
+fmOpenWrite     = 0x0001
+fmOpenReadWrite = 0x0002
+
+fmShareCompat   = 0x0000
+fmShareExclusive= 0x0010
+fmShareDenyWrite= 0x0020
+fmShareDenyRead = 0x0030
+fmShareDenyNone = 0x0040
+

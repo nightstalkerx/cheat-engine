@@ -4,10 +4,13 @@ unit pluginexports;
 
 interface
 
-uses jwawindows, windows, ExtCtrls , comctrls, Graphics, forms, StdCtrls,sysutils,Controls,
+uses {$ifdef darwin}macport,macportdefines,{$endif}
+     {$ifdef windows}jwawindows, windows,{$endif}
+     ExtCtrls , comctrls, Graphics, forms, StdCtrls,sysutils,Controls,
      SyncObjs,dialogs,LCLIntf,classes,autoassembler,
      CEFuncProc,NewKernelHandler,CEDebugger,kerneldebugger, plugin, math,
-     debugHelper, debuggertypedefinitions, typinfo, ceguicomponents, strutils, commonTypeDefs;
+     debugHelper, debuggertypedefinitions, typinfo, ceguicomponents, strutils,
+     commonTypeDefs, luahandler, lua;
 
 type TPluginFunc=function(parameters: pointer): pointer;
 function pluginsync(func: TPluginFunc; parameters: pointer): pointer; stdcall;
@@ -122,11 +125,17 @@ function ce_setProperty(c: tobject; propertyname: pchar; value: pchar): BOOL; st
 function ce_getProperty(c: tobject; propertyname: pchar; value: pchar; maxsize: integer): integer; stdcall;
 
 
+//7.1
+function plugin_checksynchronize(timeout: integer):boolean; stdcall;
+procedure plugin_processmessages; stdcall;
+function plugin_getluastate: Plua_State; stdcall;
+
 implementation
 
-uses MainUnit,MainUnit2, AdvancedOptionsUnit, Assemblerunit,disassembler,frmModifyRegistersUnit,
-     formsettingsunit, symbolhandler,frmautoinjectunit, manualModuleLoader,
-     MemoryRecordUnit, MemoryBrowserFormUnit, LuaHandler, ProcessHandlerUnit, ProcessList;
+uses MainUnit,MainUnit2, AdvancedOptionsUnit, Assemblerunit,disassembler,
+     frmModifyRegistersUnit, formsettingsunit, symbolhandler,frmautoinjectunit,
+     {$ifdef windows}manualModuleLoader,{$endif} MemoryRecordUnit, MemoryBrowserFormUnit,
+     ProcessHandlerUnit, ProcessList, BreakpointTypeDef;
 
 resourcestring
   rsLoadModuleFailed = 'LoadModule failed';
@@ -435,15 +444,18 @@ begin
 end;
 
 function ce_sym_addressToName(address:ptrUint; name: pchar; maxnamesize: integer):BOOL; stdcall;
-var s: string;
+var
+  s: string;
+  l: integer;
 begin
   result:=false;
   try
     s:=symhandler.getNameFromAddress(address,true,true);
-    if length(s)<maxnamesize then
-      copymemory(name,@s[1],length(s))
-    else
-      copymemory(name,@s[1],maxnamesize);
+
+    l:=min(maxnamesize-1, length(s));
+    copymemory(name,@s[1],l);
+
+    name[l]:=#0;
       
     result:=true;
   except
@@ -558,7 +570,12 @@ var SNAPHandle: THandle;
     Check: Boolean;
     s: string;
     s2: string;
+
+    {$ifdef darwin}
+    pl: tstringstream;
+    {$endif}
 begin
+  {$ifdef windows}
   result:=true;
   s2:='';
 
@@ -596,6 +613,11 @@ begin
   finally
     closehandle(snaphandle);
   end;
+  {$else}
+  result:=false;
+  {$endif}
+
+
 end;
 
 function ce_InjectDLL(dllname: pchar; functiontocall: pchar):BOOL; stdcall;
@@ -816,11 +838,14 @@ begin
 end;
 
 function ce_loadModule(modulepath: pchar; exportlist: pchar; maxsize: pinteger): BOOL; stdcall;
+{$ifdef windows}
 var
   ml: TModuleLoader;
   s: string;
   i: integer;
+  {$endif}
 begin
+  {$ifdef windows}
   result:=false;
   try
     ml:=TModuleLoader.create(modulepath);
@@ -841,6 +866,10 @@ begin
       messagebox(0, pchar(e.Message), pchar(rsLoadModuleFailed), MB_OK);
     end;
   end;
+  {$else}
+  result:=false;
+  {$endif}
+
 end;
 
 function pluginsync(func: TPluginFunc; parameters: pointer): pointer; stdcall;
@@ -1544,9 +1573,14 @@ begin
 
   if debuggerthread<>nil then
   begin
+    {$ifdef windows}
     if ContinueOption=co_stepover then
-      MemoryBrowser.StepOver1Click(memorybrowser.stepover1) //use the memorybrowser step code for this case. Based on the debugstate and not gui state so should work
+    begin
+      MemoryBrowser.miDebugStepOver.OnClick(MemoryBrowser.miDebugStepOver);
+      //MemoryBrowser.miDebugStepOver.Click //use the memorybrowser step code for this case. Based on the debugstate and not gui state so should work
+    end
     else
+    {$endif}
       debuggerthread.ContinueDebugging(continueoption);
 
     result:=pointer(1);
@@ -2387,6 +2421,7 @@ begin
 end;
 
 function ce_createProcess2(params: pointer): pointer;
+{$ifdef windows}
 type Tp= record
   path,params: pchar;
   debug: boolean;
@@ -2396,7 +2431,9 @@ var p: ^tp;
 
   startupinfo: windows.STARTUPINFO;
   processinfo: windows.PROCESS_INFORMATION;
+{$endif}
 begin
+  {$ifdef windows}
   p:=params;
 
   try
@@ -2438,6 +2475,7 @@ begin
     result:=nil;
 
   end;
+  {$endif}
 end;
 
 function ce_createProcess(path,params: pchar; debug, breakonentry: BOOL): BOOL; stdcall;
@@ -2482,8 +2520,8 @@ begin
     end;
     if pp<>nil then
     begin
-      freemem(pp);
-      pp:=nil;
+      freememandnil(pp);
+
     end;
 
   except
@@ -2561,6 +2599,21 @@ begin
   result:=ptruint(pluginsync(ce_getProperty2, @p));
 end;
 
+
+function plugin_checksynchronize(timeout: integer):boolean; stdcall;
+begin
+  result:=CheckSynchronize(timeout);
+end;
+
+procedure plugin_processmessages; stdcall;
+begin
+  Application.ProcessMessages;
+end;
+
+function plugin_getluastate: Plua_State; stdcall;
+begin
+  result:=GetLuaState;
+end;
 
 initialization
   plugindisassembler:=TDisassembler.create;

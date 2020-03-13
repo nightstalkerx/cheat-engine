@@ -1,72 +1,65 @@
-Cheat Engine 6.7
+Additions and changes:
+Added support for il2cpp
+Added support for .NET dll plugins
+Change register on breakpoint now also affects FP and XMM registers
+Added CEShare, a way to share your tables with other people
+Improved disassembling
+copy bytes+addresses now only does bytes+addresses
+call filter can now use the unwind data for functions to get a decent list of instructions
+structure dissect shows the pointerpath at the bottom
+Follow register while stepping
+registersymbol and label now support multiple definitions in one line
+improved the speed of the structure list when getting data from a pdb
+hexview: doubleclicking a non-byte value now shows in the type you set
+added sorting to the found code dialog
+added filtering to the changed addresses window
+the debugger settings won't lock from changing anymore, still needs you to reopen a process to have an affect
+added always hide children groupoption
+group headers can act as address now
+AA command createthreadandwait now has a timeout parameter
+Assembler scanning improvement
+Added an AVX2 version of CE, which will speed up all those floating point operations CE does so much...
+Improved structure lookup for PDB files
+Symbolhandler can now have the following types in front of pointers : (BYTE), (WORD), (DWORD), (QWORD), (CHAR), (SHORT), (INT), (UINT64) to typecast the pointer to a value of that type
+Structure dissect can detect vc++ and object pascal classnames now
+Dissect code now also detects references to strings
+Sorting the addresslist now sorts faster and more properly with regards to groups (depends on the level your current selection is)
+Rightclick the addresslist header to bring up a menu which allows you to disable sorting
+Improved the processlist responsiveness
+The chosen floating point rounding type is now saved in the registry
+
+
 
 Fixes:
-Fixed some DPI issues at some spots
-Fixed the "Not" scan for ALL
-"simple values" now also applies to the All type
-Fixed not adding the 0-terminator to strings when the option was set to add it
-Fixed ultimap hotkeys
-Fixed ultimap2 filtering
-Changing pointers in the change address dialog won't set/override global memrec and address anymore (local now)
-Fixed show as signed not working for custom types
-Fixed several issues with the structure spider
-Fixed 64-bit registers in the tracer getting truncated on doubleclick, and fix r8 to r15
-Fixed copy/paste in the scanvalue
-Fixed kernelmode QueryMemoryRegions for windows build 1607
-Fixed some disassembler errors
-Fixed lua command fullAccess
-Fixed text to speech if launched from a different thread
-Fixed clicking on checkboxes when the dpi is different
-Fixed the found code dialog count size
-Fixed mono freezing Cheat Engine when it crashes/freezes
-
-
-Additions and changes:
-Changed the processlist and added an Applications view similar to the taskmanager
-Small change to the tutorial first step wording
-Structure Dissect: Added RLE compression (by mgr.inz.player) and other things to improve filesize
-Structure Dissect: If setting a name, it will also be shown in the header
-The symbolhandler can now deal with complex pointer notations
-Added support for single-ToPA systems for ultimap2
-Added some more spots where the history will be remebered in memoryview
-Memoryrecords with auto assembler scripts can now execute their code asynchronous (rightclick and set "Execute asynchronous")
-Kernelmode memory reading/writing is safer now
-Added an option to filter out readable paths in the pointerscan rescan
-Added "codePage" support
-Added font/display options to several places in CE
-Added a search/replace to the script editors
-You can now delete addresses and reset the count from "Find what addresses this code accesses"
-Added a statusbar to the hexview in memoryview
-Pointerscan for value scans now add the results to the overflow queue
-Opening a file and changing bytes do not change them to the file anymore (you need to explicitly save now)
-Added an option to the processlist to filter out system processes
-Added a system to let users sign their tables so you know you can trust their tables.
-Memory record dropdown lists can now reference those of others. USe as entry text: (memoryrecorddescription)
-Added an option to notify users of new versions of Cheat Engine
+Fixed memoryleak when opening a file for hexediting again
+Fixed utf8 display of the dissect windows window
+Clear the taskbar progress when using a custom scan
+Hexview: Fixed changing the address when pressing a non char key
+Hexview: Fixed changing the address when doubleclicking and then canceling
+alloc with a prefered base is now more aggressive in getting the range you want
+fixed mono symbol lookup while dlls are still being loaded
+fixed the structure compare not giving a proper errormessage
+fixed improper error messages in structure dissect
+fixed opening process in XP
+fixed potential deadlock with the symbolhander
+fixed issue with using the process var as symbol
+fixed default form size for some windows when using high DPI
 
 
 lua:
-Custom Types can now be referenced from Lua
-Auto assembler lua sections now have access to "memrec" which is the memory record they get executed from. Can be nil
-stringToMD5String now support strings with a 0 byte in them
-autoAssemble() now also returns a disableInfo object as 2nd parameter. You can use this to disable a script
-added Action and Value properties to MemoryRecordHotkey objects
-added screenToClient and clientToScreen for Control objects
-added readSmallInteger and writeSmallInteger
-added enableDRM()
-added openFileAsProcess/saveOpenedFile
-added saveCurrentStateAsDesign for CEForm objects
-added disableWithoutExecute and disableAllWithoutExecute
-added OnCustomDraw* events to the listview
-added being/endUpdate for the Strings class
-added SQL support
-added color overrides to the disassembler text
-added OnPaint to the CustomControl class
-added autoAssembleCheck to syntax check an AA script
-fixed the addresslist returning nil for PopupMenu (while popupMenu did work)
-added an timeout option for pipes
-added some graphical options
-added some low level system functions
+  New functions:
+    function onTableLoad(loaded)
+    sendMessageTimeout
+    createTimer(delay,function())
+    createStructureFromName()
+    createSynEdit()
+
+
+  changes:
+    fixed executeCodeLocalEx with certain parameter definitions
+    fixed openFileAsProcess
+    checkSynchroniuze has a timeout now
+    OnGetDisplayValue now also works on AA records
 
 
 How to use:

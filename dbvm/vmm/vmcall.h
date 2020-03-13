@@ -1,7 +1,8 @@
 #ifndef VMCALL_H_
 #define VMCALL_H_
 
-#include "main.h"
+#include "vmmhelper.h"
+#include "vmcallstructs.h"
 
 #define VMCALL_GETVERSION 0
 #define VMCALL_CHANGEPASSWORD 1
@@ -49,40 +50,61 @@
 #define VMCALL_GETMEM 38
 #define VMCALL_JTAGBREAK 39
 #define VMCALL_GETNMICOUNT 40
-#define VMCALL_FINDWHATWRITESPAGE 41
+
+#define VMCALL_WATCH_WRITES 41
+#define VMCALL_WATCH_READS 42
+#define VMCALL_WATCH_RETRIEVELOG 43
+#define VMCALL_WATCH_DELETE 44
+
+#define VMCALL_CLOAK_ACTIVATE 45
+#define VMCALL_CLOAK_DEACTIVATE 46
+#define VMCALL_CLOAK_READORIGINAL 47
+#define VMCALL_CLOAK_WRITEORIGINAL 48
+
+#define VMCALL_CLOAK_CHANGEREGONBP 49
+#define VMCALL_CLOAK_REMOVECHANGEREGONBP 50
+
+#define VMCALL_EPT_RESET 51
+
+#define VMCALL_LOG_CR3VALUES_START 52
+#define VMCALL_LOG_CR3VALUES_STOP 53
+
+#define VMCALL_REGISTERPLUGIN 54
+#define VMCALL_RAISEPMI 55
+#define VMCALL_ULTIMAP2_HIDERANGEUSAGE 56
+
+#define VMCALL_ADD_MEMORY 57
+//#define VMCALL_DISABLE_EPT 58 dus nut wurk
 
 
-typedef struct
-{
-  DWORD size;
-  DWORD password2;
-  DWORD command;
-} __attribute__((__packed__))  VMCALL_BASIC, *PVMCALL_BASIC;
+#ifdef STATISTICS
+#define VMCALL_GET_STATISTICS 59
+#endif
 
-typedef struct
-{
-  VMCALL_BASIC vmcall;
-  QWORD sourcePA; //physical address to read
-  DWORD bytesToRead; //number of bytes to read
-  QWORD destinationVA; //virtual address to write to
-  DWORD nopagefault; //if not 0 stop at the first pagefault
-} __attribute__((__packed__)) VMCALL_READPHYSICALMEMORY, *PVMCALL_READPHYSICALMEMORY;
+#define VMCALL_WATCH_EXECUTES 60
+#define VMCALL_SETTSCADJUST   61
+#define VMCALL_SETSPEEDHACK   62
+#define VMCALL_CAUSEDDEBUGBREAK 63
 
-typedef struct
-{
-  VMCALL_BASIC vmcall;
-  QWORD destinationPA; //physical address to read
-  DWORD bytesToWrite; //number of bytes to read
-  QWORD sourceVA; //virtual address to write to
-  DWORD nopagefault; //if not 0 stop at the first pagefault
-} __attribute__((__packed__)) VMCALL_WRITEPHYSICALMEMORY, *PVMCALL_WRITEPHYSICALMEMORY;
+#define VMCALL_DISABLE_TSCADJUST 64
+
+#define VMCALL_CLOAKEX_ACTIVATE 65
+
+
+
+#define VMCALL_KERNELMODE 100
+#define VMCALL_USERMODE 101
+
+
+extern int hasEPTsupport;
+
 
 
 int handleVMCall(pcpuinfo currentcpuinfo, VMRegisters *vmregisters);
 
 void returnFromCR3Callback(pcpuinfo currentcpuinfo, VMRegisters *vmregisters, unsigned long long newcr3);
-QWORD readMSRSafe(pcpuinfo currentcpuinfo, DWORD msr);
-void writeMSRSafe(pcpuinfo currentcpuinfo, DWORD msr, QWORD value);
+QWORD readMSRSafe(DWORD msr);
+void writeMSRSafe(DWORD msr, QWORD value);
 
 int raiseInvalidOpcodeException(pcpuinfo currentcpuinfo); //
 int raisePagefault(pcpuinfo currentcpuinfo, UINT64 address);

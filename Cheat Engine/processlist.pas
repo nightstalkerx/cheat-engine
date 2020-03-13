@@ -5,7 +5,9 @@ unit ProcessList;
 interface
 
 uses
-  {$ifdef windows}jwawindows, windows, cefuncproc, LazUTF8, {$endif}Classes, SysUtils{$ifndef JNI}, StdCtrls{$endif}, ProcessHandlerUnit {$ifndef windows},unixporthelper{$endif},newkernelhandler;
+  {$ifdef windows}jwawindows, windows, {$endif}
+  {$ifdef darwin}macport, macportdefines,{$endif}
+  cefuncproc, LazUTF8, Classes, SysUtils{$ifndef JNI}, StdCtrls{$endif}, ProcessHandlerUnit {$ifdef JNI},unixporthelper{$endif},newkernelhandler;
 
 {$ifndef jni}
 procedure GetProcessList(ProcessList: TListBox; NoPID: boolean=false); overload;
@@ -21,22 +23,15 @@ function GetFirstModuleName(processid: dword): string;
 //global vars refering to the processlist
 var
   GetProcessIcons: Boolean;
-  ProcessesWithIconsOnly: boolean;
   ProcessesCurrentUserOnly: boolean;
 
 implementation
 
-uses Globals, networkInterfaceApi;
+uses Globals{$ifdef windows}, networkInterfaceApi, commonTypeDefs{$endif};
 
 resourcestring
     rsICanTGetTheProcessListYouArePropablyUsingWindowsNT = 'I can''t get the process list. You are propably using windows NT. Use the window list instead!';
 
-type TProcessListInfo=record
-  processID: dword;
-  processIcon: HICON;
-  issystemprocess: boolean;
-end;
-PProcessListInfo=^TProcessListInfo;
 
 {$ifdef windows}
 function GetFirstModuleName(processid: dword): string;
@@ -45,6 +40,7 @@ var
   check: boolean;
   ModuleEntry: MODULEENTRY32;
 begin
+  result:='';
   SNAPHandle:=CreateToolhelp32Snapshot(TH32CS_SNAPMODULE,processid);
   if SNAPHandle<>0 then
   begin
@@ -69,12 +65,10 @@ begin
     begin
       ProcessListInfo:= pointer( processlist.Objects[i]);
 {$ifdef windows}
-      if ProcessListInfo^.processIcon>0 then
+      if (ProcessListInfo^.processIcon<>0) and (ProcessListInfo^.processIcon<>HWND(-1)) then
       begin
         if ProcessListInfo^.processID<>GetCurrentProcessId then
           DestroyIcon(ProcessListInfo^.processIcon);
-
-        ProcessListInfo^.processIcon:=0;
       end;
 {$endif}
 
@@ -99,9 +93,20 @@ var SNAPHandle: THandle;
     HI: HICON;
     ProcessListInfo: PProcessListInfo;
     i,j: integer;
-    s: string;
-begin
+    s,s2: string;
 
+    lwindir: string;
+begin
+  cleanProcessList(ProcessList);
+
+  {$ifdef darwin}
+  macport.GetProcessList(processlist);
+  {$endif}
+
+  {$ifdef windows}
+
+
+  lwindir:=lowercase(windowsdir);
   ProcessListInfo:=nil;
   HI:=0;
 
@@ -109,7 +114,7 @@ begin
 
 //  OutputDebugString('GetProcessList()');
 
-  cleanProcessList(ProcessList);
+
 
 
  // OutputDebugString('Calling CreateToolhelp32Snapshot');
@@ -124,6 +129,8 @@ begin
     ZeroMemory(@ProcessEntry, sizeof(ProcessEntry));
 
     //OutputDebugString('Setting up processentry');
+
+
 
 
     if not assigned(Process32First) then
@@ -144,30 +151,12 @@ begin
     Check:=Process32First(SnapHandle,ProcessEntry);
     while check do
     begin
-      s:=GetFirstModuleName(processentry.th32ProcessID);
+
+      //s:=GetFirstModuleName(processentry.th32ProcessID);
 
 {$ifdef windows}
-      if (noprocessinfo=false) and getprocessicons then
-      begin
 
-
-        HI:=ExtractIcon(hinstance,ProcessEntry.szExeFile,0);
-        if HI=0 then
-        begin
-          i:=getlasterror;
-
-          //alternative method:
-          if (processentry.th32ProcessID>0) and (uppercase(copy(ExtractFileName(ProcessEntry.szExeFile), 1,3))<>'AVG') then //february 2014: AVG freezes processes that do createtoolhelp32snapshot on it's processes for several seconds. AVG has multiple processes...
-          begin
-            //s:=GetFirstModuleName(processentry.th32ProcessID);
-           // OutputDebugString(s);
-            HI:=ExtractIcon(hinstance,pchar(s),0);
-          end;
-        end;
-
-      end;
-
-      if (noprocessinfo) or (not (ProcessesWithIconsOnly and (hi=0))) and ((not ProcessesCurrentUserOnly) or (GetUserNameFromPID(processentry.th32ProcessID)=username)) then
+      if (not ProcessesCurrentUserOnly) or (GetUserNameFromPID(processentry.th32ProcessID)=username) then
       {$endif}
       begin
         if processentry.th32ProcessID<>0 then
@@ -179,16 +168,8 @@ begin
             // get some processinfo
             getmem(ProcessListInfo,sizeof(TProcessListInfo));
             ProcessListInfo.processID:=processentry.th32ProcessID;
-            ProcessListInfo.processIcon:=HI;
-
-            s:=lowercase(s);
-
-          {  if pos('cheatengine',lowercase(ProcessEntry.szExeFile))>0 then
-            begin
-              beep;
-            end;    }
-
-            ProcessListInfo.issystemprocess:=(ProcessListInfo.processID=4) or (pos(lowercase(windowsdir),s)>0) or (pos('system32',s)>0);
+            ProcessListInfo.processIcon:=0;
+            ProcessListInfo.winhandle:=0;
           end;
           {$endif}
 
@@ -223,6 +204,7 @@ begin
     raise exception.Create(rsICanTGetTheProcessListYouArePropablyUsingWindowsNT);
     {$endif}
   end;
+  {$endif}
 end;
 
 {$ifndef JNI}
@@ -231,6 +213,11 @@ var sl: tstringlist;
     i: integer;
     pli: PProcessListInfo;
 begin
+  {$ifdef darwin}
+  macport.GetProcessList(processlist.Items);
+  {$endif}
+
+  {$ifdef windows}
   sl:=tstringlist.create;
   try
     processlist.Sorted:=false;
@@ -238,14 +225,13 @@ begin
       if processlist.Items.Objects[i]<>nil then
       begin
         pli:=pointer(processlist.Items.Objects[i]);
-        if pli^.processIcon>0 then
+        if (pli^.processIcon<>0) and (pli^.processIcon<>HWND(-1)) then
         begin
           if pli^.processID<>GetCurrentProcessId then
             DestroyIcon(pli^.processIcon);
-
-          pli^.processIcon:=0;
         end;
         freemem(pli);
+        processlist.Items.Objects[i]:=nil;
       end;
 
     processlist.Items.Clear;
@@ -256,6 +242,7 @@ begin
   finally
     sl.free;
   end;
+  {$endif}
 end;
 {$endif}
 

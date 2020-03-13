@@ -1,17 +1,24 @@
 unit byteinterpreter;
 
 {$MODE Delphi}
-
+{$WARN 4105 off : Implicit string type conversion with potential data loss from "$1" to "$2"}
+{$WARN 4104 off : Implicit string type conversion from "$1" to "$2"}
 interface
 
-{$ifdef windows}
-uses windows, LCLIntf, sysutils, symbolhandler, CEFuncProc, NewKernelHandler, math,
-  CustomTypeHandler, ProcessHandlerUnit, commonTypeDefs, LazUTF8;
-{$endif}
 
-{$ifdef unix}
+
+{$ifdef jni}
 uses unixporthelper, sysutils, symbolhandler, ProcessHandlerUnit, NewKernelHandler, math,
   CustomTypeHandler, commonTypeDefs;
+{$else}
+uses
+  {$ifdef darwin}
+  macport,
+  {$endif}
+  {$ifdef windows}
+  windows,
+  {$endif}LCLIntf, sysutils, symbolhandler, CEFuncProc, NewKernelHandler, math,
+  CustomTypeHandler, ProcessHandlerUnit, commonTypeDefs, LazUTF8;
 {$endif}
 
 resourcestring
@@ -46,7 +53,7 @@ uses parsers;
 
 {$ifdef unix}
 function isreadable(address: ptruint): boolean;
-var x: dword;
+var x: ptruint;
     t: byte;
 begin
   result:=ReadProcessMemory(processhandle, pointer(address), @t, 1, x);
@@ -89,8 +96,8 @@ begin
           WriteProcessMemory(processhandle, pointer(address+i), @b[i], 1, x);
       end;
     finally
-      freemem(ba);
-      ba:=nil;
+      freememandnil(ba);
+
     end;
 
     setlength(b,0);
@@ -145,8 +152,8 @@ begin
             WriteProcessMemory(processhandle, pointer(address), ba, customtype.bytesize, x);
           end;
         finally
-          freemem(ba);
-          ba:=nil;
+          freememandnil(ba);
+
         end;
       end;
     end;
@@ -255,8 +262,8 @@ begin
         pbytearray(ws)[bytesize]:=0;
         result:=utf16toutf8(ws);
       finally
-        freemem(ws);
-        ws:=nil;
+        freememandnil(ws);
+
       end;
     end;
 
@@ -349,8 +356,8 @@ begin
         if ReadProcessMemory(processhandle,pointer(address),buf2,bytesize,x) then
           result:=readAndParsePointer(address, buf2, variabletype, customtype, showashexadecimal, showAsSigned, bytesize);
       finally
-        freemem(buf2);
-        buf2:=nil;
+        freememandnil(buf2);
+
       end;
     end;
 
@@ -364,8 +371,8 @@ begin
 
 
       finally
-        freemem(buf2);
-        buf2:=nil;
+        freememandnil(buf2);
+
       end;
     end;
 
@@ -378,8 +385,8 @@ begin
         if ReadProcessMemory(processhandle,pointer(address),buf2,bytesize,x) then
           result:=readAndParsePointer(address, buf2, variabletype, customtype, showashexadecimal, showAsSigned, bytesize);
       finally
-        freemem(buf2);
-        buf2:=nil;
+        freememandnil(buf2);
+
       end;
     end;
 
@@ -393,8 +400,8 @@ begin
             result:=readAndParsePointer(address, buf2, variabletype, customtype, showashexadecimal, showAsSigned, bytesize);
 
         finally
-          freemem(buf2);
-          buf2:=nil;
+          freememandnil(buf2);
+
         end;
       end;
     end;
@@ -426,8 +433,8 @@ begin
         tempbuf[size]:=0;
         result:=pchar(tempbuf);
       finally
-        freemem(tempbuf);
-        tempbuf:=nil;
+        freememandnil(tempbuf);
+
       end;
     end;
 
@@ -443,8 +450,8 @@ begin
         result:=tr;
 
       finally
-        freemem(tempbuf);
-        tempbuf:=nil;
+        freememandnil(tempbuf);
+
       end;
     end;
 
@@ -613,13 +620,13 @@ begin
       if processhandler.is64bit then
       begin
         if (address mod 8) = 0 then
-          val('$'+symhandler.getNameFromAddress(pqword(@buf[0])^,true,true),v,e)
+          val('$'+symhandler.getNameFromAddress(pqword(@buf[0])^,true,true,nil,nil,8,false),v,e)
         else
           e:=0;
       end
       else
       begin
-        val('$'+symhandler.getNameFromAddress(pdword(@buf[0])^,true,true),v,e);
+        val('$'+symhandler.getNameFromAddress(pdword(@buf[0])^,true,true,nil,nil,8,false),v,e);
       end;
 
       if e>0 then //named
@@ -653,7 +660,7 @@ begin
         if InRange(psingle(@buf[0])^, -100000.0, 100000.0) then
         begin
 
-          if pos(DecimalSeparator,x)>0 then
+          if pos(DefaultFormatSettings.DecimalSeparator,x)>0 then
             floathasseperator:=true;
 
           result:=vtSingle;
@@ -740,7 +747,7 @@ begin
             result:=vtCustom;
             CustomType^:=customtypes[i];
 
-            if (pos(DecimalSeparator,x)=0) then
+            if (pos(DefaultFormatSettings.DecimalSeparator,x)=0) then
               break; //found one that has no decimal seperator
 
           end;

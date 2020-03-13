@@ -352,6 +352,8 @@ function TJvDesignCustomMessenger.IsDesignMessage(ASender: TControl;
   end;
 
 begin
+  result:=false;
+
   if not Assigned(FOnDesignMessage) then
     Result := False
   else
@@ -577,7 +579,9 @@ begin
     else
       Deactivate;
     FActive := AValue;
-    SelectionChange;
+    if FActive then
+      SelectionChange;
+
     if Assigned(Container) then
       Container.Invalidate;
   end;
@@ -920,13 +924,13 @@ end;
 
 procedure TJvDesignSurface.PasteComponents;
 var
-  CO: TControl;
-  C: TComponent;
-  P: TWinControl;
-  s: tstringstream;
-  ms: TMemoryStream;
+  CO: TControl=nil;
+  C: TComponent=nil;
+//  P: TWinControl=nil;
+  s: tstringstream=nil;
+  ms: TMemoryStream=nil;
 
-  procedure KeepInParent;
+ { procedure KeepInParent;
   begin
     with P do
     begin
@@ -951,18 +955,27 @@ var
     end;
 
   end;
+         }
 
-
-  var l: TObjectList;
+var l: TObjectList;
     i: integer;
+    newparent: TComponent;
+
+    cmp: tpoint;
+
 
 begin
   s:=TStringStream.Create(clipboard.AsText);
   ms:=TMemoryStream.Create;
 
+  newparent:=SelectedContainer;
+  SelectedContainer.DisableAutoSizing;
+
   try
     LRSObjectTextToBinary(s,ms);
     ms.position:=0;
+
+
 
     l:=tobjectlist.create;
     ClearSelection;
@@ -970,7 +983,9 @@ begin
     begin
       C:=nil;
       try
-        ReadComponentFromBinaryStream(ms, C, @fcce, container, SelectedContainer, container);
+
+
+        ReadComponentFromBinaryStream(ms, C, @fcce, container, newparent, container);
         l.add(c);
       except
         break;
@@ -980,6 +995,8 @@ begin
   finally
     ms.free;
     s.free;
+
+    SelectedContainer.EnableAutoSizing;
   end;
 
 
@@ -987,9 +1004,13 @@ begin
   active:=false;
   active:=true;
 
+  self.Change;
+
+
   for i:=0 to l.count-1 do
     selector.AddToSelection(TControl(l[i]));
   SelectionChange;
+
 
 end;
 

@@ -4,12 +4,18 @@ copies dbvm into physical memory
 jumps into dbvm's os entry point
 
 */
-#pragma warning( disable: 4103)
-#include "ntifs.h"
+#pragma warning( disable: 4100 4103 4152 4189 4456)
+
+#ifndef AMD64
+#pragma warning( disable: 4740)
+#endif
+
+#include <ntifs.h>
 #include <windef.h>
 
 #include "dbkfunc.h"
 #include "vmxoffload.h"
+#include "vmxhelper.h"
 
 #ifdef TOBESIGNED
 #include "sigcheck.h"
@@ -224,6 +230,10 @@ Runs at passive mode
 
 	vmm = ExAllocatePool(PagedPool, 4 * 1024 * 1024);
 	
+	//default password when dbvm is just loaded (needed for adding extra ram)
+	vmx_password1 = 0x76543210;
+	vmx_password2 = 0xfedcba98;
+
 
 	if (vmm)
 	{
@@ -334,7 +344,7 @@ Runs at passive mode
 					PageTable2 = (PPTE_PAE)FreeVA;  FreeVA += 4096;
 					PageMapLevel4 = (PPDPTE_PAE)FreeVA;  FreeVA += 4096; //has to be the last alloc
 
-					DBVMPML4PA = MmGetPhysicalAddress(PageMapLevel4).QuadPart;
+					DBVMPML4PA = (UINT_PTR)MmGetPhysicalAddress(PageMapLevel4).QuadPart;
 
 
 					//blame MS for making this hard to read
@@ -361,8 +371,6 @@ Runs at passive mode
 
 
 					{
-						int i;
-
 						*(PUINT64)(&PageDir[2]) = MmGetPhysicalAddress(PageTable1).QuadPart;
 						PageDir[2].P = 1;
 						PageDir[2].RW = 1;
@@ -383,7 +391,7 @@ Runs at passive mode
 					}
 
 
-					i = (mainstack - (UINT64)vmm) >> 12;
+					i = (int)((UINT64)((mainstack - (UINT64)vmm)) >> 12);
 					PageTable1[i].P = 0; //mark the first page of the stack as unreadable
 
 
@@ -579,6 +587,7 @@ Runs at passive mode
 					initvars->pagedirlvl4 = 0x00400000 + ((UINT64)PageMapLevel4 - (UINT64)vmm);
 					initvars->nextstack = 0x00400000 + ((UINT64)mainstack - (UINT64)vmm) + (16 * 4096) - 0x40;
 
+					//add 64KB extra per CPU
 					initializedvmm = TRUE;
 
 					KeInitializeSpinLock(&LoadedOSSpinLock);
@@ -586,12 +595,13 @@ Runs at passive mode
 				}
 			}
 			ZwClose(dbvmimghandle);
+
+
+			DbgPrint("Opened and processed: %S\n", filename.Buffer);
 		}
 		else
 		{
 			DbgPrint("Failure opening the file. Status=%x  (filename=%S)\n", OpenedFile, filename.Buffer);
-
-
 		}
 		//fill in some specific memory regions
 
@@ -607,7 +617,6 @@ void vmxoffload(void)
 	//save entry state for easy exit in ReturnFromvmxoffload
 	EFLAGS eflags;
 
-	int i;
 	PHYSICAL_ADDRESS minPA, maxPA,boundary;
 	GDT gdt;
 	IDT idt;
@@ -636,14 +645,8 @@ void vmxoffload(void)
 	DbgPrint("initializedvmm=%d\n", initializedvmm); 
 	if (initializedvmm)
 	{
-		KIRQL oldirql;
-		
 		DbgPrint("cpunr=%d\n",cpunr());
-		//KeRaiseIrql(HIGH_LEVEL,&oldirql);
-
 		
-			
-
 		DbgPrint("Storing original state\n");
 		originalstate->cpucount=getCpuCount();
 		DbgPrint("originalstate->cpucount=%d",originalstate->cpucount);
@@ -693,7 +696,7 @@ void vmxoffload(void)
 
 		originalstate->ss=getSS();
 		originalstate->ss_AccessRights = getAccessRights(originalstate->ss);
-		originalstate->ss_Limit = getSegmentLimit(getSegmentLimit);
+		originalstate->ss_Limit = getSegmentLimit(originalstate->ss);
 
 		//DbgPrint("originalstate->ss=%I64x",originalstate->ss);
 		originalstate->cs=getCS();
@@ -850,8 +853,9 @@ void vmxoffload(void)
 			
 
 			lea ebx,NewGDTDescriptor
-			mov ecx,pagedirptrbasePA
+			mov ecx,DBVMPML4PA;
 			mov edx,TemporaryPagingSetupPA //for the mov cr3,ecx
+			
 			mov esi,enterVMM2PA
 			mov edi,originalstatePA
 			
@@ -892,6 +896,45 @@ enterVMMEpilogue:
 	
 }
 
+void vmxoffload_override(CCHAR cpunr, PKDEFERRED_ROUTINE Dpc, PVOID DeferredContext, PVOID *SystemArgument1, PVOID *SystemArgument2)
+{
+	//runs at passive (in any unrelated cpu)
+
+	//allocate 64KB of extra memory for this(and every other) cpu's DBVM
+	PHYSICAL_ADDRESS LowAddress, HighAddress, SkipBytes;
+	PMDL mdl;
+	DbgPrint("vmxoffload_override\n");
+	LowAddress.QuadPart = 0;
+	HighAddress.QuadPart = 0xffffffffffffffffI64;
+	SkipBytes.QuadPart = 0;
+	mdl=MmAllocatePagesForMdl(LowAddress, HighAddress, SkipBytes, 64 * 1024); //do not free this, EVER
+
+	if (mdl)
+	{
+		//convert the pfnlist to a list DBVM understands
+		PDBVMOffloadMemInfo mi = ExAllocatePool(NonPagedPool, sizeof(DBVMOffloadMemInfo));
+		int i;
+		PFN_NUMBER *pfnlist;
+
+		DbgPrint("vmxoffload_override: mi=%p\n", mi);
+		
+		mi->List = ExAllocatePool(NonPagedPool, sizeof(UINT64) * 16);
+
+		DbgPrint("vmxoffload_override: mi->list=%p\n", mi->List);
+
+		pfnlist = MmGetMdlPfnArray(mdl);
+		
+		for (i = 0; i < 16; i++)
+		  mi->List[i] = pfnlist[i] << 12;
+
+		mi->Count = 16;
+
+		ExFreePool(mdl);
+
+		*SystemArgument1 = mi;
+	}
+}
+
 __drv_functionClass(KDEFERRED_ROUTINE) 
 __drv_maxIRQL(DISPATCH_LEVEL) 
 __drv_minIRQL(DISPATCH_LEVEL) 
@@ -908,5 +951,23 @@ __in_opt PVOID SystemArgument2
 	DbgPrint("vmxoffload_dpc: CPU %d\n", c);
 	KeAcquireSpinLockAtDpcLevel(&LoadedOSSpinLock);
 	vmxoffload();
+
+	//still here so very likely DBVM is loaded
+	if (SystemArgument1)
+	{
+		int x;
+		PDBVMOffloadMemInfo mi = (PDBVMOffloadMemInfo)SystemArgument1;
+		DbgPrint("mi->List=%p mi->Count=%d\n", mi->List, mi->Count);
+
+		x=vmx_add_memory(mi->List, mi->Count);
+		DbgPrint("vmx_add_memory returned %x\n", x);
+
+		if (mi->List)
+			ExFreePool(mi->List);
+
+		ExFreePool(mi);
+	}
+	else
+		DbgPrint("Error: SystemArgument1=NULL\n");
 	KeReleaseSpinLockFromDpcLevel(&LoadedOSSpinLock);
 }

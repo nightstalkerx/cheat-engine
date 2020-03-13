@@ -12,8 +12,17 @@ result: tree/map was slower than my own non threadsafe implementation. After ini
 
 interface
 
-uses windows, LCLIntf, dialogs, SysUtils, classes, ComCtrls, CEFuncProc, NewKernelHandler,
-     symbolhandler, math,bigmemallochandler, maps;
+uses
+  {$ifdef darwin}
+  macport,
+  {$endif}
+  {$ifdef windows}
+  windows,
+  {$endif}
+  LCLIntf, dialogs, SysUtils, classes, ComCtrls, CEFuncProc,
+     NewKernelHandler, symbolhandler, symbolhandlerstructs, math,
+     bigmemallochandler, maps, luahandler, lua, lauxlib, lualib, luaclass,
+     LuaObject, zstream, commonTypeDefs;
 
 const scandataversion=1;
 
@@ -91,11 +100,14 @@ type
 
 
     useStacks: boolean;
-    threadStacks: integer;
     stacksAsStaticOnly: boolean;
+    {$ifdef windows}
+    threadStacks: integer;
+
     stacksize: integer;
 
     stacklist: array of ptruint;
+    {$endif}
 
     ScannablePages: TMap;
 
@@ -140,6 +152,8 @@ type
 
     property CanHaveStatic: boolean read specificBaseAsStaticOnly;
   end;
+
+  procedure initializeLuaPointerValueList;
 
 implementation
 
@@ -204,6 +218,8 @@ var
   pfn: ptruint;
 
 begin
+  if address=0 then exit(false);
+
   i:=BinSearchMemRegions(address);
   result:=(i<>-1) and (memoryregion[i].ValidPointerRange);
 
@@ -246,6 +262,7 @@ function TReversePointerListHandler.isStatic2(address: ptruint; var mi: TModuleI
 var i: integer;
 begin
   result:=false;
+  {$ifdef windows}
   if useStacks then
   begin
     for i:=0 to threadStacks-1 do
@@ -257,6 +274,7 @@ begin
       end;
     end;
   end;
+  {$endif}
 
   if (result=false) and (stacksAsStaticOnly=false) then
     result:=symhandler.getmodulebyaddress(address, mi);  //fills mi.baseaddress
@@ -807,7 +825,7 @@ begin
     mbase:=s.ReadQWord;
 
     modulelist.AddObject(mname, tobject(mbase));
-    freemem(mname);
+    freememandnil(mname);
   end;
 end;
 
@@ -971,15 +989,22 @@ begin
     symhandler.getModuleList(modulelist);
 
     self.useStacks:=useStacks;
+    {$ifdef windows}
+    self.useStacks:=useStacks;
     self.threadStacks:=threadStacks;
     self.stacksAsStaticOnly:=stacksAsStaticOnly;
     self.stacksize:=stacksize;
+    {$else}
+    self.useStacks:=false;
+    self.stacksAsStaticOnly:=false;
+    {$endif}
 
     self.specificBaseAsStaticOnly:=specificBaseAsStaticOnly;
     self.baseStart:=baseStart;
     self.baseStop:=baseStop;
 
     //fill the stacklist
+    {$ifdef windows}
     if useStacks then
     begin
       setlength(stacklist, threadstacks);
@@ -996,6 +1021,7 @@ begin
 
 
     end;
+    {$endif}
 
     if processhandler.is64Bit then
     begin
@@ -1028,6 +1054,7 @@ begin
       regionfile.free;
 
       //go through the list and add every page to a map
+      valid:=true;
       ScannablePages:=TMap.Create(ituPtrSize,0);
 
       for i:=0 to length(prangelist)-1 do
@@ -1051,6 +1078,7 @@ begin
       if (includeSystemModules or (not symhandler.inSystemModule(ptrUint(mbi.baseAddress))) ) and (not (not scan_mem_private and (mbi._type=mem_private))) and (not (not scan_mem_image and (mbi._type=mem_image))) and (not (not scan_mem_mapped and ((mbi._type and mem_mapped)>0))) and (mbi.State=mem_commit) and ((mbi.Protect and page_guard)=0) and ((mbi.protect and page_noaccess)=0) then  //look if it is commited
       begin
         if (Skip_PAGE_NOCACHE and ((mbi.AllocationProtect and PAGE_NOCACHE)=PAGE_NOCACHE)) or
+           {$ifdef windows}(Skip_PAGE_WRITECOMBINE and ((mbi.AllocationProtect and PAGE_WRITECOMBINE)=PAGE_WRITECOMBINE)) or{$endif}
            (noreadonly and (mbi.protect in [PAGE_READONLY, PAGE_EXECUTE, PAGE_EXECUTE_READ]))  then
           valid:=false
         else
@@ -1263,8 +1291,8 @@ begin
                   if InModulePointerMap.GetData(dwordpointer^, valid)=false then //not in list yet
                   begin
                     //check that the memory it points to contains a pointer to executable code
-                    if ReadProcessMemory(processhandle, pointer(dwordpointer^), @tempdword, 4, actualread) then
-                      valid:=(allowNonModulePointers and (ReadProcessMemory(processhandle, pointer(tempdword), @tempdword,4, actualread))) or isModulePointer(tempdword)
+                    if ReadProcessMemory(processhandle, pointer(ptruint(dwordpointer^)), @tempdword, 4, actualread) then
+                      valid:=(allowNonModulePointers and (ReadProcessMemory(processhandle, pointer(ptruint(tempdword)), @tempdword,4, actualread))) or isModulePointer(tempdword)
                     else
                       valid:=false;
 
@@ -1371,8 +1399,8 @@ begin
                   if InModulePointerMap.GetData(dwordpointer^, valid)=false then //not in list yet
                   begin
                     //check that the memory it points to contains a pointer to executable code
-                    if ReadProcessMemory(processhandle, pointer(dwordpointer^), @tempdword, 4, actualread) then
-                      valid:=(allowNonModulePointers and (ReadProcessMemory(processhandle, pointer(tempdword), @tempdword, 4, actualread))) or isModulePointer(tempdword)
+                    if ReadProcessMemory(processhandle, pointer(ptruint(dwordpointer^)), @tempdword, 4, actualread) then
+                      valid:=(allowNonModulePointers and (ReadProcessMemory(processhandle, pointer(ptruint(tempdword)), @tempdword, 4, actualread))) or isModulePointer(tempdword)
                     else
                       valid:=false;
 
@@ -1414,7 +1442,7 @@ begin
     finally
       //OutputDebugString('Freeing the buffer');
       if buffer<>nil then
-        freemem(buffer);
+        freememandnil(buffer);
 
       if InModulePointerMap<>nil then
       begin
@@ -1434,6 +1462,104 @@ begin
     end;
   end;
 end;
+
+//Lua support/testing
+
+function lua_createReversePointerListHandlerFromFile(L: PLua_State): integer; cdecl;
+var
+  filename: string='';
+  progressbar: tprogressbar=nil;
+  fs: tfilestream=nil;
+  ds: Tdecompressionstream=nil;
+  rplh: TReversePointerListHandler;
+begin
+  if lua_gettop(L)<0 then exit(0);
+  filename:=lua_tostring(L,1);
+
+  try
+    try
+      fs:=tfilestream.Create(filename, fmOpenRead);
+      ds:=Tdecompressionstream.create(fs);
+
+      if lua_gettop(L)>=2 then
+        progressbar:=tprogressbar(lua_touserdata(L,2));
+
+      rplh:=TReversePointerListHandler.createFromStream(ds,progressbar);
+      luaclass_newClass(L,rplh);
+      result:=1;
+    finally
+      if ds<>nil then
+        freeandnil(ds);
+
+      if fs<>nil then
+        freeandnil(fs);
+    end;
+  except
+    on e:exception do
+    begin
+      lua_pushnil(L);
+      lua_pushstring(L,e.message);
+      exit(2);
+    end;
+  end;
+end;
+
+function ReversePointerListHandler_findPointerValue(L: PLua_State): integer; cdecl;
+var
+  startvalue, stopvalue: ptruint;
+  list: TReversePointerListHandler;
+  pl: PPointerList;
+  pli: integer;
+  i: integer;
+begin
+  list:=luaclass_getClassObject(L);
+
+  startvalue:=lua_tointeger(L,1);
+  stopvalue:=lua_tointeger(L,2);
+
+  pl:=list.findPointerValue(startvalue, stopvalue);
+  if pl<>nil then
+  begin
+    lua_newtable(L);
+    pli:=lua_gettop(L);
+
+    for i:=0 to pl^.pos-1 do
+    begin
+      lua_pushinteger(L,i+1);
+      lua_pushinteger(L,pl^.list[i].address);
+      lua_settable(L,pli);
+    end;
+
+    pl:=pl^.previous;
+    if pl<>nil then
+    begin
+      stopvalue:=pl^.pointervalue;
+      lua_pushinteger(L,stopvalue);
+    end
+    else
+      lua_pushnil(L);
+
+    result:=2;
+  end
+  else
+    exit(0);
+end;
+
+procedure ReversePointerListHandler_addMetaData(L: PLua_state; metatable: integer; userdata: integer );
+begin
+  object_addMetaData(L, metatable, userdata);
+
+  luaclass_addClassFunctionToTable(L, metatable, userdata, 'findPointerValue', ReversePointerListHandler_findPointerValue);
+end;
+
+procedure initializeLuaPointerValueList;
+begin
+  Lua_register(LuaVM, 'createReversePointerListHandlerFromFile', lua_createReversePointerListHandlerFromFile);
+end;
+
+initialization
+
+  luaclass_register(TReversePointerListHandler, ReversePointerListHandler_addMetaData);
 
 end.
 

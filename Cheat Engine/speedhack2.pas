@@ -4,8 +4,8 @@ unit speedhack2;
 
 interface
 
-uses Classes,LCLIntf, SysUtils, NewKernelHandler,CEFuncProc, symbolhandler,
-     autoassembler, dialogs,Clipbrd, commonTypeDefs, controls;
+uses Classes,LCLIntf, SysUtils, NewKernelHandler,CEFuncProc, symbolhandler, symbolhandlerstructs,
+     autoassembler, dialogs,Clipbrd, commonTypeDefs, controls{$ifdef darwin},macport, FileUtil{$endif};
 
 type TSpeedhack=class
   private
@@ -35,15 +35,26 @@ constructor TSpeedhack.create;
 var i: integer;
     script: tstringlist;
     AllocArray: TCEAllocArray;
+    exceptionlist: TCEExceptionListArray;
     x: ptrUint;
 //      y: dword;
     a,b: ptrUint;
     c: TCEConnection;
+    e: boolean;
 
     fname: string;
     err: boolean;
 
     path: string;
+
+    QPCAddress: ptruint;
+    mi: TModuleInfo;
+    mat: qword;
+    machmodulebase: qword;
+    machmodulesize: qword;
+
+    HookMachAbsoluteTime: boolean;
+
 begin
   initaddress:=0;
 
@@ -58,15 +69,44 @@ begin
   else
   begin
     try
+      {$ifdef darwin}
+      if not FileExists('/usr/local/lib/libspeedhack.dylib') then
+      begin
+        path:=cheatenginedir+'libspeedhack.dylib';
+        if CopyFile(path, '/usr/local/lib/libspeedhack.dylib', true)=false then
+        begin
+          raise exception.create('Failure copying libspeedhack.dylib to /usr/lib');
+        end;
+      end;
+
+      if symhandler.getmodulebyname('libspeedhack.dylib', mi)=false then
+      begin
+        injectdll('/usr/local/lib/libspeedhack.dylib','');
+        symhandler.reinitialize;
+      end;
+
+      {$endif}
+
+      {$ifdef windows}
       if processhandler.is64bit then
         fname:='speedhack-x86_64.dll'
       else
         fname:='speedhack-i386.dll';
 
       symhandler.waitforsymbolsloaded(true, 'kernel32.dll'); //speed it up (else it'll wait inside the symbol lookup of injectdll)
-      injectdll(CheatEngineDir+fname);
-      symhandler.reinitialize;
-      symhandler.waitforsymbolsloaded(true)
+
+      symhandler.waitForExports;
+      symhandler.getAddressFromName('speedhackversion_GetTickCount',false,e);
+      if e then
+      begin
+        injectdll(CheatEngineDir+fname);
+        symhandler.reinitialize;
+        symhandler.waitforsymbolsloaded(true)
+      end;
+      {$endif}
+
+
+
     except
       on e: exception do
       begin
@@ -155,14 +195,71 @@ begin
     end
     else
     begin
-      //windows
+      //local
+
+      {$ifdef darwin}
+      HookMachAbsoluteTime:=false;
+      if speedhack_HookMachAbsoluteTime then
+      begin
+
+        mat:=symhandler.getAddressFromName('mach_absolute_time', false, err);
+        if symhandler.getmodulebyaddress(mat,mi) then
+        begin
+          machmodulebase:=mi.baseaddress;
+          machmodulesize:=mi.basesize;
+
+
+          if processhandler.is64Bit then
+          begin
+            script.add('machmodulebase:');
+            script.add('dq '+inttohex(machmodulebase,8));
+
+            script.Add('machmodulesize:');
+            script.Add('dq '+inttohex(machmodulesize,8));
+          end
+          else
+          begin
+            script.add('machmodulebase:');
+            script.add('dd '+inttohex(machmodulebase,8));
+
+            script.add('machmodulesize:');
+            script.add('dd '+inttohex(machmodulesize,8));
+          end;
+
+          HookMachAbsoluteTime:=true;
+        end;
+        //  raise exception.create('mach_absolute_time not found');
+
+      end;
+
+
+      a:=symhandler.getAddressFromName('realGetTimeOfDay') ;
+      b:=0;
+      readprocessmemory(processhandle,pointer(a),@b,processhandler.pointersize,x);
+      if b<>0 then //already configured
+      begin
+        generateAPIHookScript(script, 'gettimeofday', 'speedhackversion_GetTimeOfDay','','1');
+        if HookMachAbsoluteTime then
+          generateAPiHookScript(script, 'mach_absolute_time', 'speedhackversion_MachAbsoluteTime','','2');
+      end
+      else
+      begin
+        generateAPIHookScript(script, 'gettimeofday', 'speedhackversion_GetTimeOfDay', 'realGetTimeOfDay','1');
+        if HookMachAbsoluteTime then
+          generateAPiHookScript(script, 'mach_absolute_time', 'speedhackversion_MachAbsoluteTime','realMachAbsoluteTime','2');
+      end;
+
+      {$endif}
+
+      {$ifdef windows}
+
       if processhandler.is64bit then
         script.Add('alloc(init,512, GetTickCount)')
       else
         script.Add('alloc(init,512)');
       //check if it already has a a speedhack script running
 
-      a:=symhandler.getAddressFromName('realgettickcount') ;
+      a:=symhandler.getAddressFromName('realgettickcount', true) ;
       b:=0;
       readprocessmemory(processhandle,pointer(a),@b,processhandler.pointersize,x);
       if b<>0 then //already configured
@@ -170,13 +267,15 @@ begin
       else
         generateAPIHookScript(script, 'GetTickCount', 'speedhackversion_GetTickCount', 'realgettickcount');
 
-      if ssCtrl in GetKeyShiftState then //debug code
-        Clipboard.AsText:=script.text;
+      //if ssCtrl in GetKeyShiftState then //debug code
+      //  Clipboard.AsText:=script.text;
+      {$endif}
 
       try
         setlength(AllocArray,0);
 
-        autoassemble(script,false,true,false,false,AllocArray);
+        autoassemble(script,false,true,false,false,AllocArray, exceptionlist);
+        //clipboard.AsText:=script.text;
 
         //fill in the address for the init region
         for i:=0 to length(AllocArray)-1 do
@@ -196,8 +295,9 @@ begin
       end;
 
 
+      {$ifdef windows}
       //timegettime
-      if symhandler.getAddressFromName('timeGetTime',false,err)>0 then //might not be loaded
+      if symhandler.getAddressFromName('timeGetTime',true,err)>0 then //might not be loaded
       begin
         script.Clear;
         script.Add('timeGetTime:');
@@ -210,14 +310,20 @@ begin
 
 
       //qpc
+      qpcaddress:=symhandler.getAddressFromName('ntdll.RtlQueryPerformanceCounter',true, err);
+      if err then
+        qpcaddress:=symhandler.getAddressFromName('kernel32.RtlQueryPerformanceCounter',true);
+
+
       script.clear;
       a:=symhandler.getAddressFromName('realQueryPerformanceCounter') ;
       b:=0;
       readprocessmemory(processhandle,pointer(a),@b,processhandler.pointersize,x);
+
       if b<>0 then //already configured
-        generateAPIHookScript(script, 'QueryPerformanceCounter', 'speedhackversion_QueryPerformanceCounter')
+        generateAPIHookScript(script, inttohex(qpcaddress,8), 'speedhackversion_QueryPerformanceCounter')
       else
-        generateAPIHookScript(script, 'QueryPerformanceCounter', 'speedhackversion_QueryPerformanceCounter', 'realQueryPerformanceCounter');
+        generateAPIHookScript(script, inttohex(qpcaddress,8), 'speedhackversion_QueryPerformanceCounter', 'realQueryPerformanceCounter');
 
       try
         autoassemble(script,false);
@@ -226,7 +332,7 @@ begin
       end;
 
       //gettickcount64
-      if symhandler.getAddressFromName('GetTickCount64',false,err)>0 then
+      if symhandler.getAddressFromName('GetTickCount64',true,err)>0 then
       begin
         script.clear;
         a:=symhandler.getAddressFromName('realGetTickCount64') ;
@@ -243,6 +349,7 @@ begin
           raise exception.Create(rsFailureConfiguringSpeedhackPart+' 3');
         end;
       end;
+      {$endif}
 
 
     end;
@@ -253,6 +360,7 @@ begin
 
   setspeed(1);
   fprocessid:=processhandlerunit.processid;
+
 end;
 
 destructor TSpeedhack.destroy;

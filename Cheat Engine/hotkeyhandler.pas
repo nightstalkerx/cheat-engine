@@ -4,7 +4,15 @@ unit HotkeyHandler;
 
 interface
 
-uses windows, LCLIntf,classes,SyncObjs,CEFuncProc,messages,genericHotkey, math,
+uses
+  {$ifdef darwin}
+  macport,
+  {$endif}
+  {$ifdef windows}
+  windows,
+  {$endif}
+
+  LCLType,LCLIntf,classes,sysutils, SyncObjs,CEFuncProc,messages,genericHotkey, math,
   commonTypeDefs;
 
 type thotkeyitem=record
@@ -22,17 +30,24 @@ type thotkeyitem=record
   delayBetweenActivate: integer; //If not 0 this is a userdefined delay for a hotkey, so you have have fast responding and slow responding hotkeys at the same time
 end;
 
-type PHotkeyItem=^THotkeyItem;
+type
+  PHotkeyItem=^THotkeyItem;
 
-type Thotkeythread=class(tthread)
+  THotkeyThreadState=(htsActive=0, htsMemrecOnly=1, htsNoMemrec=2, htsDisabled=3);
+
+
+  Thotkeythread=class(tthread)
   private
     memrechk: pointer;
+    fstate: THotkeyThreadState;
     procedure memrechotkey;
   public
     suspended: boolean;
     hotkeylist: array of thotkeyitem;
     procedure execute; override;
     constructor create(suspended: boolean);
+  published
+    property state: THotkeyThreadState read fState write fState;
 end;
 
 
@@ -45,41 +60,52 @@ function GetGenericHotkeyKeyItem(generichotkey: TGenericHotkey): PHotkeyItem;
 
 //function OldUnregisterHotKey(hWnd: HWND; id: Integer): BOOL; stdcall;
 function GetKeyComboLength(keycombo: TKeyCombo): integer;
-function CheckKeyCombo(keycombo: tkeycombo):boolean;
+function CheckKeyCombo(keycombo: tkeycombo; nocache: boolean=false):boolean;
 procedure ConvertOldHotkeyToKeyCombo(fsModifiers, vk: uint; var k: tkeycombo);
 procedure ClearHotkeylist;
 procedure SuspendHotkeyHandler;
 procedure ResumeHotkeyHandler;
 procedure hotkeyTargetWindowHandleChanged(oldhandle, newhandle: thandle);
 
-function IsKeyPressed(key: integer):boolean;
+function IsKeyPressed(key: integer; nocache: boolean=false):boolean;
 
+
+procedure InitializeHotkeyHandler;
 
 var hotkeythread: THotkeythread;
     CSKeys: TCriticalSection;
 
+
     hotkeyPollInterval: integer=100;
     hotkeyIdletime: integer=100;
 
+const WM_HOTKEY2=$8000;
+
+
 implementation
 
-uses MemoryRecordUnit, xinput, winsapi, MainUnit;
+uses MemoryRecordUnit, {$ifdef windows}xinput,winsapi,{$endif} MainUnit;
 
 type tkeystate=(ks_undefined=0, ks_pressed=1, ks_notpressed=2);
 
 var
     keystate: array [0..255] of tkeystate;  //0=undefined, 1=pressed, 2-not pressed
+    ksCS: TCriticalSection;
+    {$ifdef windows}
     ControllerState: XINPUT_STATE;
+    {$endif}
 
-function IsKeyPressed(key: integer):boolean;
+function IsKeyPressed(key: integer; nocache: boolean=false):boolean;
 var
     ks: dword;
+    sks: short;
 begin
   result:=false;
   if key>255 then //not inside the list... (doubt it's valid)
   begin
     //anyhow, check if it is currently pressed
 
+    {$ifdef windows}
     if (key>=VK_PAD_A) and (key<=VK_PAD_RTHUMB_DOWNLEFT) then
     begin
       //controller key
@@ -135,34 +161,64 @@ begin
       end;
     end
     else
+    {$endif}
       result:=((word(getasynckeystate(key)) shr 15) and 1) = 1;
     exit;
   end;
 
   //look up in the list
+  sks:=0;
+  ksCS.enter;
   if keystate[key]=ks_undefined then
   begin
-    ks:=getasynckeystate(key);
-    if ((ks and 1)=1) then
+    sks:=getasynckeystate(longint(key));
+    if ((sks and 1)=1) then
       keystate[key]:=ks_pressed
     else
-    if ((ks shr 15) and 1)=1 then
+    if ((sks shr 15) and 1)=1 then
       keystate[key]:=ks_pressed
     else
       keystate[key]:=ks_notpressed; //not pressed at all
   end;
 
   result:=keystate[key]=ks_pressed;
+
+  if nocache and (not result) then
+  begin
+    if sks<>0 then
+      result:=(sks and $8001)<>0;
+
+    if result then exit;
+
+    sks:=GetAsyncKeyState(longint(key));
+    result:=(sks and $8001)<>0;
+
+    if result=false then
+    begin
+      sks:=GetKeyState(key);
+      result:=(sks and $8001)<>0;
+      if not result then
+      begin
+        beep;
+      end;
+    end;
+  end;
+
+  ksCS.Leave;
 end;
 
 procedure clearkeystate;
 var i: integer;
 begin
+  ksCS.enter;
   zeromemory(@keystate[0],256*sizeof(tkeystate));
   for i:=0 to 255 do
     getasynckeystate(i); //clears the last call flag
 
+  {$ifdef windows}
   ControllerState.dwPacketNumber:=0;
+  {$endif}
+  ksCS.leave;
 end;
 
 procedure hotkeyTargetWindowHandleChanged(oldhandle, newhandle: thandle);
@@ -181,16 +237,20 @@ begin
   end;
 end;
 
+var presuspendstate: THotkeyThreadState;
 procedure SuspendHotkeyHandler;
 begin
-  if not hotkeythread.suspended then cskeys.Enter;
-  hotkeythread.suspended:=true;
+  if hotkeythread<>nil then
+  begin
+    presuspendstate:=hotkeythread.state;
+    hotkeythread.state:=htsDisabled;
+  end;
 end;
 
 procedure ResumeHotkeyHandler;
 begin
-  if hotkeythread.suspended then cskeys.Leave;
-  hotkeythread.suspended:=false;
+  if hotkeythread<>nil then
+    hotkeythread.state:=presuspendstate;
 end;
 
 procedure ClearHotkeylist;
@@ -213,7 +273,7 @@ begin
       inc(result);
 end;
 
-function CheckKeyCombo(keycombo: tkeycombo):boolean;
+function CheckKeyCombo(keycombo: tkeycombo; nocache: boolean=false):boolean;
 var i: integer;
 begin
   result:=false;
@@ -226,7 +286,7 @@ begin
     begin
       if (keycombo[i]=0) then exit;
 
-      if not IsKeyPressed(keycombo[i]) then
+      if not IsKeyPressed(keycombo[i], nocache) then
       begin
         //not pressed
         result:=false;
@@ -407,7 +467,9 @@ begin
     end;
 
     //still here so not found, try windows
+    {$ifdef windows}
     result:=windows.UnregisterHotKey(hWnd,id)
+    {$endif}
 
   finally
     CSKeys.Leave;
@@ -443,6 +505,8 @@ var i: integer;
     maxActiveKeyCount: integer;
 
     tempHotkey: PActiveHotkeyData;
+
+    handeit: boolean;
 begin
   activeHotkeyList:=Tlist.create;
   while not terminated do
@@ -455,12 +519,10 @@ begin
         maxActiveKeyCount:=0;
         for i:=0 to length(hotkeylist)-1 do
         begin
-
-
           if
-            ((hotkeylist[i].memrechotkey<>nil) and (checkkeycombo(TMemoryrecordHotkey(hotkeylist[i].memrechotkey).keys))) or
-            ((hotkeylist[i].genericHotkey<>nil) and (checkkeycombo(TGenericHotkey(hotkeylist[i].generichotkey).keys))) or
-            (((hotkeylist[i].memrechotkey=nil) and (hotkeylist[i].generichotkey=nil)) and checkkeycombo(hotkeylist[i].keys))
+            ((state in [htsActive,htsMemrecOnly]) and (hotkeylist[i].memrechotkey<>nil) and (checkkeycombo(TMemoryrecordHotkey(hotkeylist[i].memrechotkey).keys))) or
+            ((state in [htsActive,htsNoMemrec]) and (hotkeylist[i].genericHotkey<>nil) and (checkkeycombo(TGenericHotkey(hotkeylist[i].generichotkey).keys))) or
+            ((state in [htsActive,htsNoMemrec]) and ((hotkeylist[i].memrechotkey=nil) and (hotkeylist[i].generichotkey=nil)) and checkkeycombo(hotkeylist[i].keys))
 
           then
           begin
@@ -487,7 +549,8 @@ begin
         end;
 
         //now go through the activeHotkeyList looking for a keycount of maxActiveKeyCount
-        for i:=0 to activeHotkeyList.count-1 do
+        i:=0;
+        while i<activeHotkeyList.count do
         begin
           temphotkey:=PActiveHotkeyData(activeHotkeyList[i]);
           if temphotkey.keycount=maxActiveKeyCount then //it belongs to the max complex hotkey count
@@ -506,24 +569,29 @@ begin
                 if tempHotkey.hotkeylistItem.memrechotkey<>nil then
                 begin
                   memrechk:=tempHotkey.hotkeylistItem.memrechotkey;
+
+                  CSKeys.leave;
                   Synchronize(memrechotkey);
+                  cskeys.enter;
                 end
                 else
                 if tempHotkey.hotkeylistItem.generichotkey<>nil then
-                  sendmessage(a,integer(cefuncproc.WM_HOTKEY2),1,ptrUint(tempHotkey.hotkeylistItem.genericHotkey))
+                  sendmessage(a,integer(WM_HOTKEY2),1,ptrUint(tempHotkey.hotkeylistItem.genericHotkey))
                 else
-                  sendmessage(a,integer(cefuncproc.WM_HOTKEY2),b,0)
+                  sendmessage(a,integer(WM_HOTKEY2),b,0)
 
 
               end
+              {$ifdef windows}
               else
                 sendmessage(a,WM_HOTKEY,b,c);
+              {$endif}
             end;
           end;
 
           //cleanup the memory as well while we're at it
-          freemem(temphotkey);
-          temphotkey:=nil;
+          freememandnil(temphotkey);
+          inc(i);
         end;
         activeHotkeyList.clear;
 
@@ -540,10 +608,23 @@ begin
   end;
 end;
 
+procedure InitializeHotkeyHandler;
+begin
+  if hotkeythread=nil then
+    hotkeythread:=Thotkeythread.Create(false);
+end;
+
 initialization
+  ksCS:=TCriticalSection.Create;
   clearkeystate;
+
   CSKeys:=TCriticalSection.Create;
-  hotkeythread:=Thotkeythread.Create(false);
+
+  InitializeHotkeyHandler;
+
+  {$ifdef windows}
+  //hotkeythread:=Thotkeythread.Create(false);
+  {$endif}
 
 finalization
   if hotkeythread<>nil then
